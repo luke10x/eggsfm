@@ -9,7 +9,7 @@ g++ -std=c++17 \
     ../my-ym2612-plugin/build/_deps/ymfm-src/src/ymfm_adpcm.cpp \
     ../my-ym2612-plugin/build/_deps/ymfm-src/src/ymfm_ssg.cpp \
     ../my-ym2612-plugin/build/_deps/ymfm-src/src/ymfm_opn.cpp \
-    demo2.cpp \
+    demo5.cpp \
     -std=c++17 \
     -framework Cocoa -framework IOKit -framework CoreVideo -framework CoreAudio -framework AudioToolbox \
     -framework ForceFeedback -framework Carbon -framework Metal -framework GameController -framework CoreHaptics \

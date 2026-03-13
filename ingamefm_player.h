@@ -358,6 +358,26 @@ struct IngameFMChannelState
     int    volume      = 0x7F;    // last used volume (as TL complement: 0=loud)
 };
 
+// Per-voice SFX runtime state
+struct SfxVoiceState
+{
+    int  sfx_id           = -1;   // -1 = no SFX holding this voice
+    int  priority         = 0;    // 0 = music (lowest), >0 = SFX
+    int  ticks_remaining  = 0;    // counts down in rows; 0 = expired
+    int  current_row      = 0;    // SFX cursor row
+    int  sample_in_row    = 0;    // sample position within current SFX row
+    int  samples_per_row  = 0;    // from SfxDef
+    bool pending_has_note = false;
+    bool pending_is_off   = false;
+    int  pending_note     = 0;
+    int  pending_inst     = 0;
+    int  pending_vol      = 0x7F;
+    int  last_instrument  = 0;    // SFX channel state (instrument memory)
+    int  last_volume      = 0x7F;
+
+    bool active() const { return sfx_id >= 0 && ticks_remaining > 0; }
+};
+
 class IngameFMPlayer
 {
 public:
@@ -472,6 +492,106 @@ public:
     // Always call with the SDL audio device locked.
     IngameFMChip* chip() { return ym_.get(); }
 
+    // -------------------------------------------------------------------------
+    // SFX API
+    // -------------------------------------------------------------------------
+
+    // sfx_reserve(n) — designate the last N channels as SFX-capable voices.
+    // Music may still play on them when no SFX holds them.
+    // Must be called before start().
+    void sfx_reserve(int n)
+    {
+        if (n < 0 || n > MAX_CHANNELS)
+            throw std::runtime_error("sfx_reserve: n must be 0.." + std::to_string(MAX_CHANNELS));
+        sfx_voices_ = n;
+    }
+
+    // sfx_define(id, pattern, tick_rate, speed) — pre-parse an SFX pattern.
+    // id        : caller-chosen integer key (0-255)
+    // pattern   : single-channel Furnace pattern text (same format as set_song)
+    // tick_rate : ticks per second for this SFX (e.g. 60)
+    // speed     : rows per tick group (e.g. 6)
+    // May be called at any time (even while audio is running).
+    void sfx_define(int id, const std::string& pattern, int tick_rate, int speed)
+    {
+        if (id < 0 || id > 255)
+            throw std::runtime_error("sfx_define: id must be 0-255");
+        if (tick_rate <= 0 || speed <= 0)
+            throw std::runtime_error("sfx_define: tick_rate and speed must be > 0");
+
+        SfxDef def;
+        def.song            = parse_ingamefm_song(pattern);
+        def.tick_rate       = tick_rate;
+        def.speed           = speed;
+        def.samples_per_row = static_cast<int>(
+            static_cast<double>(SAMPLE_RATE) / tick_rate * speed);
+        sfx_defs_[id]         = std::move(def);
+        sfx_defs_present_[id] = true;
+    }
+
+    // sfx_play(id, priority, duration_ticks) — trigger an SFX immediately.
+    // Scans reserved voices right-to-left; picks the rightmost free voice,
+    // or the rightmost voice with strictly lower priority.
+    // If no suitable voice is found, the call is silently ignored.
+    // Must be called with the SDL audio device locked.
+    void sfx_play(int id, int priority, int duration_ticks)
+    {
+        if (!sfx_defs_present_[id]) return;
+        if (sfx_voices_ == 0)       return;
+        if (!ym_)                   return;
+
+        const SfxDef& def  = sfx_defs_[id];
+        int first_sfx_ch   = MAX_CHANNELS - sfx_voices_;
+
+        int best_ch        = -1;
+        int best_priority  = priority;  // we need strictly lower than this
+
+        // Scan right-to-left: prefer rightmost free, then rightmost lower-priority
+        for (int ch = MAX_CHANNELS - 1; ch >= first_sfx_ch; --ch)
+        {
+            SfxVoiceState& v = sfx_voice_[ch];
+            int cur_prio = v.active() ? v.priority : 0;
+
+            if (!v.active())
+            {
+                // Free voice — ideal, take it immediately
+                best_ch       = ch;
+                best_priority = -1;  // can't beat free
+                break;
+            }
+            else if (cur_prio < best_priority)
+            {
+                best_ch       = ch;
+                best_priority = cur_prio;
+            }
+        }
+
+        if (best_ch < 0) return;  // all reserved voices have equal/higher priority
+
+        // Evict whatever is on best_ch
+        ym_->key_off(best_ch);
+        ch_state_[best_ch].active = false;
+
+        // Initialise SFX voice
+        SfxVoiceState& v   = sfx_voice_[best_ch];
+        v.sfx_id           = id;
+        v.priority         = priority;
+        v.ticks_remaining  = duration_ticks;
+        v.current_row      = 0;
+        v.sample_in_row    = 0;
+        v.samples_per_row  = def.samples_per_row;
+        v.pending_has_note = false;
+        v.pending_is_off   = false;
+        v.last_instrument  = 0;
+        v.last_volume      = 0x7F;
+
+        // Start immediately: eviction already called key_off, so skip it in
+        // sfx_process_row and go straight to commit_keyon.
+        sfx_process_row(best_ch, 0, /*skip_keyoff=*/true);
+        sfx_commit_keyon(best_ch);
+        v.sample_in_row    = KEY_OFF_GAP_SAMPLES;  // already committed
+    }
+
     // Audio callback — wire this into SDL_AudioSpec::callback when sharing a device.
     static void s_audio_callback(void* userdata, Uint8* stream, int len)
     {
@@ -482,6 +602,23 @@ public:
     static constexpr int SAMPLE_RATE = 44100;
 
 private:
+    // -------------------------------------------------------------------------
+    // SFX private data
+    // -------------------------------------------------------------------------
+
+    struct SfxDef
+    {
+        IngameFMSong song;
+        int tick_rate       = 60;
+        int speed           = 6;
+        int samples_per_row = 0;
+    };
+
+    std::array<SfxDef,  256> sfx_defs_{};
+    std::array<bool,    256> sfx_defs_present_{};
+    int                      sfx_voices_ = 0;   // last N channels are SFX-eligible
+    std::array<SfxVoiceState, MAX_CHANNELS> sfx_voice_{};
+
     // -------------------------------------------------------------------------
     // Internal state
     // -------------------------------------------------------------------------
@@ -514,6 +651,8 @@ private:
             ch = IngameFMChannelState{};
         for (auto& p : pending_)
             p = {};
+        for (auto& v : sfx_voice_)
+            v = SfxVoiceState{};
         ym_ = std::make_unique<IngameFMChip>();
         // Row 0: key_off (chip is silent, so no EG to worry about),
         // then immediately commit key_on — no gap needed at startup.
@@ -562,6 +701,9 @@ private:
             if (ev.volume >= 0)
                 ch_state_[ch].volume = ev.volume;
 
+            // Don't interrupt an SFX-held voice with music key_off
+            if (sfx_voice_[ch].active()) continue;
+
             if (ev.note == NOTE_OFF)
             {
                 ym_->key_off(ch);
@@ -587,6 +729,9 @@ private:
     {
         for (int ch = 0; ch < MAX_CHANNELS; ch++)
         {
+            // Don't let music key_on a channel that SFX currently owns
+            if (sfx_voice_[ch].active()) continue;
+
             if (!pending_[ch].has_note)
                 continue;
 
@@ -630,6 +775,126 @@ private:
     }
 
     // -------------------------------------------------------------------------
+    // SFX per-voice helpers
+    // -------------------------------------------------------------------------
+
+    // Process one SFX row for a single voice/channel.
+    // skip_keyoff: true when called from sfx_play (eviction already did key_off)
+    void sfx_process_row(int ch, int rowIdx, bool skip_keyoff = false)
+    {
+        SfxVoiceState& v   = sfx_voice_[ch];
+        const SfxDef&  def = sfx_defs_[v.sfx_id];
+
+        v.pending_has_note = false;
+        v.pending_is_off   = false;
+
+        if (rowIdx >= static_cast<int>(def.song.rows.size())) return;
+
+        const IngameFMEvent& ev = def.song.rows[rowIdx].channels[0];
+
+        if (ev.instrument >= 0) v.last_instrument = ev.instrument;
+        if (ev.volume     >= 0) v.last_volume     = ev.volume;
+
+        if (ev.note == NOTE_OFF)
+        {
+            if (!skip_keyoff) ym_->key_off(ch);
+            v.pending_is_off = true;
+        }
+        else if (ev.note >= 0)
+        {
+            if (!skip_keyoff) ym_->key_off(ch);
+            v.pending_has_note = true;
+            v.pending_note     = ev.note;
+            v.pending_inst     = v.last_instrument;
+            v.pending_vol      = v.last_volume;
+        }
+    }
+
+    // Commit key_on for a single SFX voice after the gap.
+    void sfx_commit_keyon(int ch)
+    {
+        SfxVoiceState& v = sfx_voice_[ch];
+        if (!v.pending_has_note) return;
+
+        int instId = v.pending_inst;
+        if (patches_present_[instId])
+        {
+            YM2612Patch p  = patches_[instId];
+            int vol        = v.pending_vol;
+            int tl_add     = ((0x7F - vol) * 127) / 0x7F;
+
+            bool isCarrier[4] = { false, false, false, false };
+            switch (p.ALG)
+            {
+                case 0: case 1: case 2: case 3:
+                    isCarrier[3] = true; break;
+                case 4:
+                    isCarrier[1] = true; isCarrier[3] = true; break;
+                case 5: case 6:
+                    isCarrier[1] = isCarrier[2] = isCarrier[3] = true; break;
+                case 7:
+                    isCarrier[0] = isCarrier[1] = isCarrier[2] = isCarrier[3] = true; break;
+            }
+            for (int op = 0; op < 4; op++)
+                if (isCarrier[op])
+                    p.op[op].TL = std::min(127, p.op[op].TL + tl_add);
+
+            ym_->load_patch(p, ch);
+        }
+
+        double hz = IngameFMChip::midi_to_hz(v.pending_note);
+        ym_->set_frequency(ch, hz, 0);
+        ym_->key_on(ch);
+        v.pending_has_note = false;
+    }
+
+    // Advance one SFX voice by `samples` audio samples.
+    // Called from audio_callback for every SFX-active voice each buffer chunk.
+    void sfx_tick_voice(int ch, int samples)
+    {
+        SfxVoiceState& v = sfx_voice_[ch];
+        if (!v.active()) return;
+
+        const SfxDef& def = sfx_defs_[v.sfx_id];
+        int remaining = samples;
+
+        while (remaining > 0)
+        {
+            bool in_gap     = v.sample_in_row < KEY_OFF_GAP_SAMPLES;
+            int  next_bound = in_gap ? KEY_OFF_GAP_SAMPLES : v.samples_per_row;
+            int  to_advance = std::min(remaining, next_bound - v.sample_in_row);
+
+            v.sample_in_row += to_advance;
+            remaining       -= to_advance;
+
+            // Crossed gap → key_on
+            if (in_gap && v.sample_in_row >= KEY_OFF_GAP_SAMPLES)
+                sfx_commit_keyon(ch);
+
+            // Crossed row boundary → advance SFX row
+            if (v.sample_in_row >= v.samples_per_row)
+            {
+                v.sample_in_row = 0;
+                v.ticks_remaining--;
+
+                if (v.ticks_remaining <= 0)
+                {
+                    // SFX expired — silence and release the voice
+                    ym_->key_off(ch);
+                    v = SfxVoiceState{};
+                    return;
+                }
+
+                v.current_row++;
+                if (v.current_row >= static_cast<int>(def.song.rows.size()))
+                    v.current_row = 0;  // loop SFX pattern
+
+                sfx_process_row(ch, v.current_row);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // SDL audio callback
     // -------------------------------------------------------------------------
 
@@ -661,6 +926,13 @@ private:
             int to_generate   = std::min(remaining, next_boundary - pos_in_row);
 
             ym_->generate(out, to_generate);
+
+            // Advance SFX voice cursors by the same sample count.
+            // (chip audio was already generated above; sfx_tick_voice only
+            //  manages row/gap cursors and calls key_off/key_on as needed.)
+            for (int ch = MAX_CHANNELS - sfx_voices_; ch < MAX_CHANNELS; ++ch)
+                sfx_tick_voice(ch, to_generate);
+
             out            += to_generate * 2;
             remaining      -= to_generate;
             sample_in_row_ += to_generate;

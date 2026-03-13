@@ -174,9 +174,43 @@ static constexpr int PATCH_SNARE_BLOCK      = 0;
 static constexpr int PATCH_SNARE_LFO_ENABLE = 0;
 static constexpr int PATCH_SNARE_LFO_FREQ   = 0;
 
-// =============================================================================
-// Patch catalogue — iterate all patches at runtime if needed
-// =============================================================================
+// FM Hi-hat — metallic noise burst, extremely short.
+// Play at any high note (e.g. A5 / MIDI 81).
+static constexpr YM2612Patch PATCH_HIHAT =
+{
+    // ALG 7: all four ops are carriers — maximum noise density
+    .ALG = 7, .FB = 7, .AMS = 0, .FMS = 0,
+    .op =
+    {
+        { .DT=3, .MUL=13, .TL= 8, .RS=3, .AR=31, .AM=0, .DR=31, .SR=0, .SL=15, .RR=15, .SSG=0 },
+        { .DT=2, .MUL=11, .TL=12, .RS=3, .AR=31, .AM=0, .DR=31, .SR=0, .SL=15, .RR=15, .SSG=0 },
+        { .DT=1, .MUL= 7, .TL=16, .RS=3, .AR=31, .AM=0, .DR=30, .SR=0, .SL=15, .RR=14, .SSG=0 },
+        { .DT=0, .MUL=15, .TL=20, .RS=3, .AR=31, .AM=0, .DR=29, .SR=0, .SL=15, .RR=13, .SSG=0 }
+    }
+};
+static constexpr int PATCH_HIHAT_BLOCK      = 0;
+static constexpr int PATCH_HIHAT_LFO_ENABLE = 0;
+static constexpr int PATCH_HIHAT_LFO_FREQ   = 0;
+
+// FM Metal clang — inharmonic bell-like clang, sharp attack, medium decay.
+// Play at a mid-high note (e.g. D4 / MIDI 62).
+static constexpr YM2612Patch PATCH_CLANG =
+{
+    // ALG 3: OP1 -> (OP2 -> OP4), OP3 -> OP4 — inharmonic sum into one carrier
+    .ALG = 3, .FB = 6, .AMS = 0, .FMS = 0,
+    .op =
+    {
+        { .DT= 3, .MUL=11, .TL= 0, .RS=3, .AR=31, .AM=0, .DR=25, .SR=0, .SL=15, .RR=12, .SSG=0 },
+        { .DT=-2, .MUL= 7, .TL= 8, .RS=2, .AR=31, .AM=0, .DR=22, .SR=0, .SL=15, .RR=10, .SSG=0 },
+        { .DT= 2, .MUL=13, .TL=12, .RS=2, .AR=31, .AM=0, .DR=20, .SR=0, .SL=15, .RR= 9, .SSG=0 },
+        { .DT= 0, .MUL= 1, .TL= 0, .RS=0, .AR=31, .AM=0, .DR=18, .SR=0, .SL=15, .RR= 8, .SSG=0 }
+    }
+};
+static constexpr int PATCH_CLANG_BLOCK      = 0;
+static constexpr int PATCH_CLANG_LFO_ENABLE = 0;
+static constexpr int PATCH_CLANG_LFO_FREQ   = 0;
+
+
 
 struct PatchEntry
 {
@@ -198,5 +232,7 @@ static const PatchEntry PATCH_CATALOGUE[] =
     { "Flute",         &PATCH_FLUTE,         PATCH_FLUTE_BLOCK,         PATCH_FLUTE_LFO_ENABLE,         PATCH_FLUTE_LFO_FREQ         },
     { "Kick",          &PATCH_KICK,          PATCH_KICK_BLOCK,          PATCH_KICK_LFO_ENABLE,          PATCH_KICK_LFO_FREQ          },
     { "Snare",         &PATCH_SNARE,         PATCH_SNARE_BLOCK,         PATCH_SNARE_LFO_ENABLE,         PATCH_SNARE_LFO_FREQ         },
+    { "Hi-hat",        &PATCH_HIHAT,         PATCH_HIHAT_BLOCK,         PATCH_HIHAT_LFO_ENABLE,         PATCH_HIHAT_LFO_FREQ         },
+    { "Clang",         &PATCH_CLANG,         PATCH_CLANG_BLOCK,         PATCH_CLANG_LFO_ENABLE,         PATCH_CLANG_LFO_FREQ         },
 };
 static constexpr int PATCH_CATALOGUE_SIZE = static_cast<int>(sizeof(PATCH_CATALOGUE) / sizeof(PATCH_CATALOGUE[0]));
