@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ingamefm patch editor</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+
+    /* Canvas fills the entire viewport — ImGui draws its own UI on top */
+    #canvas {
+      display: block;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100vw  !important;
+      height: 100vh !important;
+    }
+
+    /* Emscripten sometimes wraps the canvas — flatten it */
+    #canvas-container, .emscripten_border {
+      position: fixed !important;
+      top: 0 !important; left: 0 !important;
+      width: 100% !important; height: 100% !important;
+      border: none !important;
+    }
+
+    /* Thin progress bar during wasm download */
+    #progress {
+      position: fixed;
+      top: 0; left: 0;
+      height: 2px;
+      width: 0%;
+      background: #7ef7c8;
+      z-index: 10;
+      transition: width 0.2s, opacity 0.4s;
+    }
+    #progress.hidden { opacity: 0; }
+
+    /* Small status label — disappears once loaded */
+    #status {
+      position: fixed;
+      top: 8px; left: 50%;
+      transform: translateX(-50%);
+      z-index: 11;
+      color: rgba(200, 200, 200, 0.75);
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      pointer-events: none;
+      transition: opacity 0.4s;
+    }
+    #status.hidden { opacity: 0; }
+  </style>
+</head>
+<body>
+
+  <div id="progress"></div>
+  <div id="status">Loading…</div>
+
+  <!-- id="canvas" is what Emscripten SDL2 targets by default -->
+  <canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
+
+  <script>
+    // Keep canvas pixel dimensions exactly equal to the window size so
+    // ImGui and the GL viewport see the correct resolution.
+    function resizeCanvas() {
+      var c = document.getElementById('canvas');
+      c.width  = window.innerWidth;
+      c.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    document.getElementById('canvas').addEventListener('contextmenu',
+      function(e) { e.preventDefault(); });
+
+    var Module = {
+      canvas: document.getElementById('canvas'),
+
+      setStatus: function(text) {
+        var bar = document.getElementById('progress');
+        var lbl = document.getElementById('status');
+        if (!text) {
+          bar.classList.add('hidden');
+          lbl.classList.add('hidden');
+          return;
+        }
+        lbl.textContent = text;
+        var m = text.match(/\((\d+(\.\d+)?)\/(\d+)\)/);
+        if (m) {
+          bar.style.width = (parseFloat(m[1]) / parseFloat(m[3]) * 100) + '%';
+        }
+      },
+
+      monitorRunDependencies: function(left) {
+        if (left === 0) Module.setStatus('');
+      },
+
+      onRuntimeInitialized: function() {
+        Module.setStatus('');
+        resizeCanvas();
+      },
+
+      print:    function(t) { console.log('[wasm]', t); },
+      printErr: function(t) { console.warn('[wasm]', t); },
+
+      arguments: []
+    };
+  </script>
+
+  {{{ SCRIPT }}}
+
+</body>
+</html>
