@@ -425,6 +425,30 @@ public:
     }
 
     // -------------------------------------------------------------------------
+    // Volume control
+    // -------------------------------------------------------------------------
+
+    // set_music_volume(v) — master attenuation for all music channels.
+    // v = 1.0 (full volume, default) .. 0.0 (silent).
+    // Takes effect on the next note key-on; already-playing notes are unaffected.
+    // Safe to call from any thread (atomic store).
+    void set_music_volume(float v)
+    {
+        int att = static_cast<int>((1.0f - std::max(0.0f, std::min(1.0f, v))) * 127.0f);
+        music_attenuation_.store(att);
+    }
+
+    // set_sfx_volume(v) — master attenuation for all SFX voices.
+    // v = 1.0 (full volume, default) .. 0.0 (silent).
+    // Takes effect on the next SFX note key-on.
+    // Safe to call from any thread (atomic store).
+    void set_sfx_volume(float v)
+    {
+        int att = static_cast<int>((1.0f - std::max(0.0f, std::min(1.0f, v))) * 127.0f);
+        sfx_attenuation_.store(att);
+    }
+
+    // -------------------------------------------------------------------------
     // Playback modes
     // -------------------------------------------------------------------------
 
@@ -630,6 +654,9 @@ private:
 
     std::unique_ptr<IngameFMChip> ym_;
 
+    std::atomic<int> music_attenuation_{ 0 };  // 0=full, 127=silent
+    std::atomic<int> sfx_attenuation_  { 0 };
+
     int  current_row_   = 0;
     int  sample_in_row_ = 0;
     bool loop_          = false;
@@ -743,8 +770,9 @@ private:
                 // Volume 0x00 = silent (maximum TL increase = 127).
                 // We work on a copy so the master patch struct is never mutated.
                 YM2612Patch p = patches_[instId];
-                int vol = pending_[ch].volume;               // 0-127
-                int tl_add = ((0x7F - vol) * 127) / 0x7F;   // 0 at full vol, 127 at silence
+                int vol    = pending_[ch].volume;             // 0-127
+                int tl_add = ((0x7F - vol) * 127) / 0x7F;   // per-note attenuation
+                tl_add     = std::min(127, tl_add + music_attenuation_.load()); // + master
 
                 // Carrier flags per algorithm (OPN standard)
                 bool isCarrier[4] = { false, false, false, false };
@@ -821,7 +849,8 @@ private:
         {
             YM2612Patch p  = patches_[instId];
             int vol        = v.pending_vol;
-            int tl_add     = ((0x7F - vol) * 127) / 0x7F;
+            int tl_add     = ((0x7F - vol) * 127) / 0x7F;   // per-note attenuation
+            tl_add         = std::min(127, tl_add + sfx_attenuation_.load()); // + master
 
             bool isCarrier[4] = { false, false, false, false };
             switch (p.ALG)
