@@ -142,19 +142,19 @@ static const char* SONG =
 "16\n"
 /* row  0 */ "C-4007F|.......|" "\n"   // pad: C4 on
 /* row  1 */ ".......|.......|" "\n"
-/* row  2 */ ".......|C-4007F|" "\n"   // staccato: C4 on
+/* row  2 */ ".......|C-4017F|" "\n"   // staccato: C4 on  (inst 01)
 /* row  3 */ ".......|OFF....|" "\n"   //            C4 off
 /* row  4 */ "E-4007F|.......|" "\n"   // pad: E4
 /* row  5 */ ".......|.......|" "\n"
-/* row  6 */ ".......|E-4007F|" "\n"   // staccato: E4
+/* row  6 */ ".......|E-4017F|" "\n"   // staccato: E4
 /* row  7 */ ".......|OFF....|" "\n"
 /* row  8 */ "A-4007F|.......|" "\n"   // pad: A4
 /* row  9 */ ".......|.......|" "\n"
-/* row 10 */ ".......|A-4007F|" "\n"   // staccato: A4
+/* row 10 */ ".......|A-4017F|" "\n"   // staccato: A4
 /* row 11 */ ".......|OFF....|" "\n"
 /* row 12 */ "F-4007F|.......|" "\n"   // pad: F4
 /* row 13 */ ".......|.......|" "\n"
-/* row 14 */ ".......|F-4007F|" "\n"   // staccato: F4
+/* row 14 */ ".......|F-4017F|" "\n"   // staccato: F4
 /* row 15 */ "OFF....|OFF....|" "\n";  // both off before loop
 
 // =============================================================================
@@ -350,6 +350,9 @@ struct AppState
     SDL_AudioDeviceID audioDev = 0;
     IngameFMPlayer    player;
 
+    // Mute state — one flag per channel
+    bool muted[2] = { false, false };
+
     // Timing
     Uint32 lastTick  = 0;
     float  fpsSmooth = 0.0f;
@@ -362,27 +365,63 @@ static AppState g_app;
 // =============================================================================
 // 10. PATCH SYNC HELPERS
 //
-// pushPatch — writes editor's current patch into the player (instrument 0x00)
-//             AND directly into the chip for channels 0 and 1 so the
-//             currently sounding note changes without waiting for a retrigger.
+// pushPatch  — called on every slider/instrument change.
+//              Always updates the editor's real patch.
+//              Respects current mute state when deciding what the player sees.
 //
-// Because the player's commit_keyon() applies volume scaling on a copy, the
-// direct chip write skips volume — good enough for a live editor preview.
-// On the next note trigger the player re-reads patches_[0x00] and applies
-// correct volume.  That's exactly what we want.
+// applyMute  — called when a mute checkbox toggles.
+//              Re-syncs both the player map and the live chip registers.
+//
+// Mute strategy:
+//   The player's audio callback calls commit_keyon() at every note trigger,
+//   which calls chip->load_patch(patches_[instId], ch).  So the only reliable
+//   way to keep a channel silent is to make patches_[instId] itself silent for
+//   that channel's instrument — otherwise the real patch gets re-loaded on the
+//   next note and the mute breaks.
+//
+//   We keep the real patch in editor.editPatches[] (UI always shows true values).
+//   The player's slot 0x00 gets either the real patch or a TL=127 copy depending
+//   on the per-channel mute flag.  Because both channels share instrument 0x00,
+//   we need per-channel control: channel 0 uses instrument 0x00, channel 1 uses
+//   instrument 0x01.  That way each can independently carry a real or silent patch.
+//
+//   initAudio() registers the same real patch under both 0x00 and 0x01.
+//   pushPatch / applyMute keep them in sync with the mute state.
 // =============================================================================
+
+// Returns a copy of patch p with all operator TLs set to 127 (full attenuation).
+static YM2612Patch makeSilent(const YM2612Patch& p)
+{
+    YM2612Patch s = p;
+    for (int i = 0; i < 4; i++) s.op[i].TL = 127;
+    return s;
+}
+
+// Sync instrument slots 0x00 (ch0) and 0x01 (ch1) to the player, and update
+// the live chip registers for both channels.  Must be called under audio lock.
+static void syncPatches_locked(AppState& app)
+{
+    const YM2612Patch& real   = app.editor.current();
+    YM2612Patch        silent = makeSilent(real);
+
+    // Player map: ch0 → inst 0x00, ch1 → inst 0x01
+    app.player.add_patch(0x00, app.muted[0] ? silent : real);
+    app.player.add_patch(0x01, app.muted[1] ? silent : real);
+
+    // Chip registers: update sounding voices immediately
+    app.player.chip()->load_patch(app.muted[0] ? silent : real, 0);
+    app.player.chip()->load_patch(app.muted[1] ? silent : real, 1);
+}
 
 static void pushPatch(AppState& app)
 {
-    const YM2612Patch& p = app.editor.current();
     SDL_LockAudioDevice(app.audioDev);
-    // Update the player's patch map so future note triggers use the new patch
-    app.player.add_patch(0x00, p);
-    // Apply to both song channels immediately so the live sound changes
-    app.player.chip()->load_patch(p, 0);
-    app.player.chip()->load_patch(p, 1);
+    syncPatches_locked(app);
     SDL_UnlockAudioDevice(app.audioDev);
 }
+
+// Same as pushPatch — kept as a named alias for call-site clarity.
+static void applyMute(AppState& app) { pushPatch(app); }
 
 // =============================================================================
 // 11. IMGUI PATCH EDITOR
@@ -523,17 +562,17 @@ static bool drawPatchEditor(AppState& app, float fps)
     snprintf(s, sizeof(s), "##%s%d", lbl, op); \
     if (ImGui::SliderInt(s, &o.fld, lo, hi)) changed = true;
 
-            OPS("DT",  DT,  -3,   3)
-            OPS("MUL", MUL,  0,  15)
             OPS("TL",  TL,   0, 127)
-            OPS("RS",  RS,   0,   3)
+            OPS("SSG", SSG,  0,   8)
             OPS("AR",  AR,   0,  31)
-            OPS("AM",  AM,   0,   1)
             OPS("DR",  DR,   0,  31)
             OPS("SR",  SR,   0,  31)
             OPS("SL",  SL,   0,  15)
             OPS("RR",  RR,   0,  15)
-            OPS("SSG", SSG,  0,   8)
+            OPS("MUL", MUL,  0,  15)
+            OPS("DT",  DT,  -3,   3)
+            OPS("RS",  RS,   0,   3)
+            OPS("AM",  AM,   0,   1)
 #undef OPS
         }
 
@@ -541,7 +580,19 @@ static bool drawPatchEditor(AppState& app, float fps)
     }
 
     ImGui::Spacing();
-    ImGui::TextDisabled("Ch0: long pad  |  Ch1: staccato  |  both use instrument 0x00");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // ── Mute ─────────────────────────────────────────────────────────────────
+    // Toggling a checkbox calls pushPatch so the chip is updated immediately.
+    bool muteChanged = false;
+    muteChanged |= ImGui::Checkbox("Mute Ch0 (pad)",      &app.muted[0]);
+    ImGui::SameLine();
+    muteChanged |= ImGui::Checkbox("Mute Ch1 (staccato)", &app.muted[1]);
+    if (muteChanged) changed = true;
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Ch0: pad (inst 0x00)  |  Ch1: staccato (inst 0x01)  |  editor controls both");
 
     ImGui::End();
     return changed;
@@ -659,8 +710,10 @@ static bool initAudio(AppState& app)
 {
     try {
         app.player.set_song(SONG, /*tick_rate=*/60, /*speed=*/12);
-        // Instrument 0x00 gets the first catalogue patch; can be changed at runtime
+        // Ch0 uses inst 0x00, ch1 uses inst 0x01 — both start as the same patch.
+        // syncPatches_locked() keeps them in sync with the mute state at runtime.
         app.player.add_patch(0x00, app.editor.current());
+        app.player.add_patch(0x01, app.editor.current());
     } catch (const std::exception& ex) {
         fprintf(stderr, "Song parse error: %s\n", ex.what());
         return false;
