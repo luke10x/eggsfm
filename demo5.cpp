@@ -198,6 +198,11 @@ int main(int /*argc*/, char** /*argv*/)
     bool running = true;
     while (running)
     {
+        // SDL_WaitEventTimeout(1) blocks for at most 1ms waiting for an event,
+        // then returns whether one arrived. This keeps CPU usage low while
+        // polling events far more frequently than SDL_Delay(1) which typically
+        // sleeps 10-15ms on most OSes — that extra sleep is what makes SFX
+        // feel delayed compared to demo3's vsync-driven loop.
         SDL_Event e;
         while (SDL_PollEvent(&e))
         {
@@ -234,7 +239,7 @@ int main(int /*argc*/, char** /*argv*/)
                 }
             }
         }
-        SDL_Delay(1);
+        SDL_WaitEventTimeout(nullptr, 1);
     }
 
     SDL_CloseAudioDevice(dev);
