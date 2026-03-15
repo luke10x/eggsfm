@@ -68,8 +68,7 @@ public:
 
     IngameFMChip() : chip(intf) { chip.reset(); }
 
-    // Write one register.
-    // port 0 = channels 0-2, port 1 = channels 3-5.
+    // Write one register (port 0 only — channels 0-2)
     void write(uint8_t port, uint8_t reg, uint8_t val)
     {
         chip.write(port * 2 + 0, reg);
@@ -77,7 +76,7 @@ public:
     }
 
     // Load a YM2612Patch into hardware channel ch (0-5).
-    // ch 0-2 -> port 0, ch 3-5 -> port 1 (hw index within port = ch % 3).
+    // ch 0-2 use port 0, ch 3-5 use port 1 (hwch = ch % 3).
     void load_patch(const YM2612Patch& p, int ch)
     {
         const uint8_t port = (ch >= 3) ? 1 : 0;
@@ -96,11 +95,9 @@ public:
             write(port, 0x60 + hwSlot * 4 + hwch, ((op.AM & 0x01) << 7) | (op.DR & 0x1F));
             write(port, 0x70 + hwSlot * 4 + hwch, op.SR & 0x1F);
             write(port, 0x80 + hwSlot * 4 + hwch, ((op.SL & 0x0F) << 4) | (op.RR & 0x0F));
-
             uint8_t ssg_hw = (op.SSG > 0) ? (0x08 | ((op.SSG - 1) & 0x07)) : 0;
             write(port, 0x90 + hwSlot * 4 + hwch, ssg_hw);
         }
-
         write(port, 0xB0 + hwch, ((p.FB & 0x07) << 3) | (p.ALG & 0x07));
         write(port, 0xB4 + hwch, 0xC0 | ((p.AMS & 0x03) << 4) | (p.FMS & 0x07));
     }
@@ -121,10 +118,8 @@ public:
         const double fref = static_cast<double>(YM_CLOCK) / 144.0;
         int block = 4;
         double fn = hz * static_cast<double>(1 << (20 - block)) / fref;
-
         while (fn > 0x7FF && block < 7) { block++; fn /= 2.0; }
         while (fn < 0x200 && block > 0) { block--; fn *= 2.0; }
-
         auto fnum = static_cast<uint16_t>(std::min(0x7FF, std::max(0, static_cast<int>(fn))));
         write(port, 0xA4 + hwch, ((block & 7) << 3) | ((fnum >> 8) & 0x07));
         write(port, 0xA0 + hwch, fnum & 0xFF);
@@ -132,17 +127,13 @@ public:
 
     void key_on(int ch)
     {
-        // reg 0x28: bits 1-0 = channel within port, bit 2 = port select
-        const uint8_t hwch     = ch % 3;
-        const uint8_t port_bit = (ch >= 3) ? 0x04 : 0x00;
-        write(0, 0x28, 0xF0 | port_bit | hwch);
+        // reg 0x28: bits 1-0 = channel in port, bit 2 = port
+        write(0, 0x28, 0xF0 | ((ch >= 3) ? 0x04 : 0x00) | (ch % 3));
     }
 
     void key_off(int ch)
     {
-        const uint8_t hwch     = ch % 3;
-        const uint8_t port_bit = (ch >= 3) ? 0x04 : 0x00;
-        write(0, 0x28, port_bit | hwch);
+        write(0, 0x28, ((ch >= 3) ? 0x04 : 0x00) | (ch % 3));
     }
 
     // Generate 'samples' stereo frames into a 16-bit interleaved buffer
