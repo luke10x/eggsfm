@@ -1,7 +1,7 @@
 // =============================================================================
 // demo5.cpp  — ingamefm: 6-channel music + game SFX priority system
 //
-// All 6 YM2612 voices filled with music. sfx_reserve(3) means ch3/ch4/ch5
+// All 6 YM2612 voices filled with music. sfx_set_voices(3) means ch3/ch4/ch5
 // are evictable — every SFX borrows from those. Ch0/ch1/ch2 always play.
 //
 // Channels:
@@ -166,7 +166,7 @@ int main(int /*argc*/, char** /*argv*/)
         player.add_patch(0x07, PATCH_ELECTRIC_BASS);
 
         // ch3, ch4, ch5 are SFX-evictable (ch0/1/2 always play)
-        player.sfx_reserve(3);
+        player.sfx_set_voices(3);
 
         // SFX patches
         player.add_patch(0x10, PATCH_SLAP_BASS);

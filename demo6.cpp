@@ -423,7 +423,7 @@ static void drawSfxPanel(AppState& app)
         ImGuiWindowFlags_NoCollapse);
 
     // ── Channel legend ────────────────────────────────────────────────────────
-    ImGui::TextDisabled("6-channel music  |  sfx_reserve(3)  |  ch3-5 evictable");
+    ImGui::TextDisabled("6-channel music  |  sfx_set_voices(3)  |  sfx has own 3-voice pool");
     ImGui::Separator();
 
     // ── Volume sliders ────────────────────────────────────────────────────────
@@ -626,7 +626,7 @@ static bool initAudio(AppState& app)
         app.player.add_patch(0x07, PATCH_ELECTRIC_BASS);
 
         // ch3-5 are SFX-evictable
-        app.player.sfx_reserve(3);
+        app.player.sfx_set_voices(3);
 
         // SFX patches
         app.player.add_patch(0x10, PATCH_SLAP_BASS);
