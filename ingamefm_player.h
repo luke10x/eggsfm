@@ -312,13 +312,14 @@ public:
     {
         SDL_LockAudioDevice(dev);
         finished_.store(true);
-        for (int ch = 0; ch < MAX_CHANNELS; ch++)
-            if (ym_) ym_->key_off(ch);
+        for (int ch = 0; ch < MAX_CHANNELS; ch++) {
+            if (ym_music_) chip_for(ch)->key_off(ch);
+        }
         SDL_UnlockAudioDevice(dev);
     }
 
     bool is_finished() const { return finished_.load(); }
-    IngameFMChip* chip() { return ym_.get(); }
+    IngameFMChip* chip(int ch = 0) { return chip_for(ch); }
 
     void sfx_reserve(int n)
     {
@@ -347,7 +348,7 @@ public:
     {
         if (!sfx_defs_present_[id]) return;
         if (sfx_voices_ == 0)       return;
-        if (!ym_)                   return;
+        if (!ym_music_)             return;
         const SfxDef& def  = sfx_defs_[id];
         int first_sfx_ch   = MAX_CHANNELS - sfx_voices_;
         int best_ch        = -1;
@@ -359,7 +360,7 @@ public:
             else if (v.priority < best_priority) { best_ch = ch; best_priority = v.priority; }
         }
         if (best_ch < 0) return;
-        ym_->key_off(best_ch);
+        chip_for(best_ch)->key_off(best_ch);
         ch_state_[best_ch].active = false;
         SfxVoiceState& v   = sfx_voice_[best_ch];
         v.sfx_id           = id;
@@ -404,10 +405,22 @@ private:
     int         speed_           = 6;
     int         samples_per_row_ = 0;
 
-    std::unique_ptr<IngameFMChip> ym_;
+    std::unique_ptr<IngameFMChip> ym_music_; // ch 0 .. MAX_CHANNELS-sfx_voices_-1
+    std::unique_ptr<IngameFMChip> ym_sfx_;   // ch MAX_CHANNELS-sfx_voices_ .. MAX_CHANNELS-1
 
     std::atomic<float> music_vol_{ 1.0f };
     std::atomic<float> sfx_vol_  { 1.0f };
+
+    // Route a channel to its owning chip.
+    // Music channels always go to ym_music_.
+    // Reserved channels always go to ym_sfx_ (whether playing music or SFX).
+    // Both chips generate independently and are mixed with separate scalars.
+    IngameFMChip* chip_for(int ch)
+    {
+        if (sfx_voices_ > 0 && ch >= MAX_CHANNELS - sfx_voices_)
+            return ym_sfx_.get();
+        return ym_music_.get();
+    }
 
     int  current_row_   = 0;
     int  sample_in_row_ = 0;
@@ -428,7 +441,18 @@ private:
         for (auto& ch : ch_state_) ch = IngameFMChannelState{};
         for (auto& p : pending_)   p = {};
         for (auto& v : sfx_voice_) v = SfxVoiceState{};
-        ym_ = std::make_unique<IngameFMChip>();
+        ym_music_ = std::make_unique<IngameFMChip>();
+        ym_sfx_   = std::make_unique<IngameFMChip>();
+        // Enable L+R panning on all channels of both chips.
+        // ymfm resets 0xB4 to 0x00 (both channels disabled).
+        // load_patch() overwrites this for channels it touches,
+        // but channels that never get a patch would stay silent.
+        for (int c = 0; c < 3; ++c) {
+            ym_music_->write(0, 0xB4 + c, 0xC0);
+            ym_music_->write(1, 0xB4 + c, 0xC0);
+            ym_sfx_->write(0, 0xB4 + c, 0xC0);
+            ym_sfx_->write(1, 0xB4 + c, 0xC0);
+        }
         process_row(0);
         commit_keyon();
         sample_in_row_ = KEY_OFF_GAP_SAMPLES;
@@ -458,13 +482,13 @@ private:
             if (sfx_voice_[ch].active()) continue;
             if (ev.note == NOTE_OFF)
             {
-                ym_->key_off(ch);
+                chip_for(ch)->key_off(ch);
                 ch_state_[ch].active = false;
                 pending_[ch].is_off  = true;
             }
             else if (ev.note >= 0)
             {
-                ym_->key_off(ch);
+                chip_for(ch)->key_off(ch);
                 ch_state_[ch].active   = false;
                 pending_[ch].has_note  = true;
                 pending_[ch].midi_note = ev.note;
@@ -496,11 +520,11 @@ private:
                 }
                 for (int op = 0; op < 4; op++)
                     if (isCarrier[op]) p.op[op].TL = std::min(127, p.op[op].TL + tl_add);
-                ym_->load_patch(p, ch);
+                chip_for(ch)->load_patch(p, ch);
             }
             double hz = IngameFMChip::midi_to_hz(pending_[ch].midi_note);
-            ym_->set_frequency(ch, hz, 0);
-            ym_->key_on(ch);
+            chip_for(ch)->set_frequency(ch, hz, 0);
+            chip_for(ch)->key_on(ch);
             ch_state_[ch].active  = true;
             pending_[ch].has_note = false;
         }
@@ -518,12 +542,12 @@ private:
         if (ev.volume     >= 0) v.last_volume     = ev.volume;
         if (ev.note == NOTE_OFF)
         {
-            if (!skip_keyoff) ym_->key_off(ch);
+            if (!skip_keyoff) chip_for(ch)->key_off(ch);
             v.pending_is_off = true;
         }
         else if (ev.note >= 0)
         {
-            if (!skip_keyoff) ym_->key_off(ch);
+            if (!skip_keyoff) chip_for(ch)->key_off(ch);
             v.pending_has_note = true;
             v.pending_note     = ev.note;
             v.pending_inst     = v.last_instrument;
@@ -551,11 +575,11 @@ private:
             }
             for (int op = 0; op < 4; op++)
                 if (isCarrier[op]) p.op[op].TL = std::min(127, p.op[op].TL + tl_add);
-            ym_->load_patch(p, ch);
+            chip_for(ch)->load_patch(p, ch);
         }
         double hz = IngameFMChip::midi_to_hz(v.pending_note);
-        ym_->set_frequency(ch, hz, 0);
-        ym_->key_on(ch);
+        chip_for(ch)->set_frequency(ch, hz, 0);
+        chip_for(ch)->key_on(ch);
         v.pending_has_note = false;
     }
 
@@ -580,7 +604,7 @@ private:
                 v.ticks_remaining--;
                 if (v.ticks_remaining <= 0)
                 {
-                    ym_->key_off(ch);
+                    ym_sfx_->key_off(ch);
                     v = SfxVoiceState{};
                     return;
                 }
@@ -606,21 +630,30 @@ private:
             int next_boundary = in_gap ? KEY_OFF_GAP_SAMPLES : samples_per_row_;
             int to_generate   = std::min(remaining, next_boundary - pos_in_row);
 
-            // Single generate pass. Volume scalar: music_vol_ normally,
-            // sfx_vol_ when any SFX voice is active. Applied as float multiply
-            // on the output samples — no TL manipulation, timbre preserved.
+            // Two independent chips, mixed in float with separate volume scalars.
+            // ym_music_ carries music-only channels, ym_sfx_ carries SFX-evictable
+            // channels (which play music when no SFX holds them).
+            // Each chip already scales its output by 1/6 in generate(), so
+            // summing them needs one more /2 to stay within int16 range.
             {
-                ym_->generate(out, to_generate);
-                float scalar = music_vol_.load();
-                if (sfx_voices_ > 0) {
-                    float sv = sfx_vol_.load();
-                    for (int c = MAX_CHANNELS - sfx_voices_; c < MAX_CHANNELS; ++c)
-                        if (sfx_voice_[c].active()) { scalar = sv; break; }
-                }
-                if (scalar < 1.0f) {
-                    const int n = to_generate * 2;
-                    for (int i = 0; i < n; ++i)
-                        out[i] = static_cast<int16_t>(out[i] * scalar);
+                const float mv = music_vol_.load();
+                const float sv = sfx_vol_.load();
+                const int   n  = to_generate * 2;
+
+                // Music chip
+                ym_music_->generate(out, to_generate);
+
+                // SFX chip — generate into scratch on stack
+                // (max to_generate = 128 samples = 256 int16s, fits easily)
+                int16_t sfx_buf[256 * 2];
+                ym_sfx_->generate(sfx_buf, to_generate);
+
+                // Mix: each chip at half weight so sum never exceeds int16 range
+                for (int i = 0; i < n; ++i) {
+                    float mixed = static_cast<float>(out[i])     * (mv * 0.5f)
+                                + static_cast<float>(sfx_buf[i]) * (sv * 0.5f);
+                    out[i] = static_cast<int16_t>(
+                        std::max(-32768.f, std::min(32767.f, mixed)));
                 }
             }
 
@@ -649,7 +682,7 @@ private:
                     {
                         std::memset(out, 0, remaining * 4);
                         for (int ch = 0; ch < MAX_CHANNELS; ch++)
-                            ym_->key_off(ch);
+                            chip_for(ch)->key_off(ch);
                         finished_.store(true);
                         return;
                     }
