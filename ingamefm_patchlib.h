@@ -136,15 +136,21 @@ public:
         write(0, 0x28, ((ch >= 3) ? 0x04 : 0x00) | (ch % 3));
     }
 
-    // Generate 'samples' stereo frames into a 16-bit interleaved buffer
+    // Generate 'samples' stereo frames into a 16-bit interleaved buffer.
+    // ymfm returns int32 sums of all active channels. With 6 channels each
+    // contributing up to ±32767, the raw sum can reach ±196602 — far outside
+    // int16 range. We scale down by 1/6 to guarantee no overflow regardless
+    // of how many channels are playing simultaneously.
     void generate(int16_t* stream, int samples)
     {
         for (int i = 0; i < samples; i++)
         {
             ymfm::ym2612::output_data out;
             chip.generate(&out, 1);
-            stream[i * 2 + 0] = out.data[0];
-            stream[i * 2 + 1] = out.data[1];
+            stream[i * 2 + 0] = static_cast<int16_t>(
+                std::max(-32768, std::min(32767, out.data[0] / 6)));
+            stream[i * 2 + 1] = static_cast<int16_t>(
+                std::max(-32768, std::min(32767, out.data[1] / 6)));
         }
     }
 
