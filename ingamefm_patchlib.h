@@ -148,9 +148,9 @@ public:
             ymfm::ym2612::output_data out;
             chip.generate(&out, 1);
             stream[i * 2 + 0] = static_cast<int16_t>(
-                std::max(-32768, std::min(32767, out.data[0] / 6)));
+                std::max(-32768, std::min(32767, out.data[0])));
             stream[i * 2 + 1] = static_cast<int16_t>(
-                std::max(-32768, std::min(32767, out.data[1] / 6)));
+                std::max(-32768, std::min(32767, out.data[1])));
         }
     }
 

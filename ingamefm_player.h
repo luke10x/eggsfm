@@ -360,7 +360,8 @@ public:
             else if (v.priority < best_priority) { best_ch = ch; best_priority = v.priority; }
         }
         if (best_ch < 0) return;
-        chip_for(best_ch)->key_off(best_ch);
+        ym_music_->key_off(best_ch); // stop music note
+        ym_sfx_->key_off(best_ch);   // stop prior SFX
         ch_state_[best_ch].active = false;
         SfxVoiceState& v   = sfx_voice_[best_ch];
         v.sfx_id           = id;
@@ -411,16 +412,12 @@ private:
     std::atomic<float> music_vol_{ 1.0f };
     std::atomic<float> sfx_vol_  { 1.0f };
 
-    // Route a channel to its owning chip.
-    // Music channels always go to ym_music_.
-    // Reserved channels always go to ym_sfx_ (whether playing music or SFX).
-    // Both chips generate independently and are mixed with separate scalars.
-    IngameFMChip* chip_for(int ch)
-    {
-        if (sfx_voices_ > 0 && ch >= MAX_CHANNELS - sfx_voices_)
-            return ym_sfx_.get();
-        return ym_music_.get();
-    }
+    // All music operations (song notes, key_on/off from process_row/commit_keyon)
+    // always go to ym_music_. ym_sfx_ is only written to by sfx_commit_keyon
+    // and sfx_process_row — never by the music path.
+    // This means ym_music_ is always at music_vol_ and ym_sfx_ is always at
+    // sfx_vol_, with no switching or blending between them.
+    IngameFMChip* chip_for(int /*ch*/) { return ym_music_.get(); }
 
     int  current_row_   = 0;
     int  sample_in_row_ = 0;
@@ -542,12 +539,18 @@ private:
         if (ev.volume     >= 0) v.last_volume     = ev.volume;
         if (ev.note == NOTE_OFF)
         {
-            if (!skip_keyoff) chip_for(ch)->key_off(ch);
+            if (!skip_keyoff) {
+                ym_music_->key_off(ch); // silence music note on this channel
+                ym_sfx_->key_off(ch);   // silence any previous SFX
+            }
             v.pending_is_off = true;
         }
         else if (ev.note >= 0)
         {
-            if (!skip_keyoff) chip_for(ch)->key_off(ch);
+            if (!skip_keyoff) {
+                ym_music_->key_off(ch); // silence music note
+                ym_sfx_->key_off(ch);   // silence any previous SFX
+            }
             v.pending_has_note = true;
             v.pending_note     = ev.note;
             v.pending_inst     = v.last_instrument;
@@ -575,11 +578,11 @@ private:
             }
             for (int op = 0; op < 4; op++)
                 if (isCarrier[op]) p.op[op].TL = std::min(127, p.op[op].TL + tl_add);
-            chip_for(ch)->load_patch(p, ch);
+            ym_sfx_->load_patch(p, ch);
         }
         double hz = IngameFMChip::midi_to_hz(v.pending_note);
-        chip_for(ch)->set_frequency(ch, hz, 0);
-        chip_for(ch)->key_on(ch);
+        ym_sfx_->set_frequency(ch, hz, 0);
+        ym_sfx_->key_on(ch);
         v.pending_has_note = false;
     }
 
@@ -604,7 +607,7 @@ private:
                 v.ticks_remaining--;
                 if (v.ticks_remaining <= 0)
                 {
-                    ym_sfx_->key_off(ch);
+                    ym_sfx_->key_off(ch); // SFX done; music resumes on ym_music_
                     v = SfxVoiceState{};
                     return;
                 }
@@ -646,14 +649,27 @@ private:
                 // SFX chip — generate into scratch on stack
                 // (max to_generate = 128 samples = 256 int16s, fits easily)
                 int16_t sfx_buf[256 * 2];
-                ym_sfx_->generate(sfx_buf, to_generate);
+                ym_sfx_->generate(sfx_buf, to_generate); // always advance clock
 
-                // Mix: each chip at half weight so sum never exceeds int16 range
-                for (int i = 0; i < n; ++i) {
-                    float mixed = static_cast<float>(out[i])     * (mv * 0.5f)
-                                + static_cast<float>(sfx_buf[i]) * (sv * 0.5f);
-                    out[i] = static_cast<int16_t>(
-                        std::max(-32768.f, std::min(32767.f, mixed)));
+                // ym_music_ always at music_vol_, ym_sfx_ always at sfx_vol_.
+                // Only mix ym_sfx_ when SFX is actually active — when idle
+                // ym_sfx_ has no keyed-on notes but ymfm may still emit a
+                // residual DC signal that causes audible hum.
+                bool any_sfx = false;
+                if (sfx_voices_ > 0)
+                    for (int c = MAX_CHANNELS - sfx_voices_; c < MAX_CHANNELS; ++c)
+                        if (sfx_voice_[c].active()) { any_sfx = true; break; }
+
+                if (any_sfx && sv > 0.0f) {
+                    for (int i = 0; i < n; ++i) {
+                        float mixed = static_cast<float>(out[i])     * mv
+                                    + static_cast<float>(sfx_buf[i]) * sv;
+                        out[i] = static_cast<int16_t>(
+                            std::max(-32768.f, std::min(32767.f, mixed)));
+                    }
+                } else if (mv < 1.0f) {
+                    for (int i = 0; i < n; ++i)
+                        out[i] = static_cast<int16_t>(out[i] * mv);
                 }
             }
 
