@@ -134,6 +134,174 @@ enum class SongChangeWhen { NOW, AT_PATTERN_END };
 class IngameFMPlayer
 {
 public:
+    // =======================================================================
+    // CACHE DUMP/LOAD (For xxd embedding workflow)
+    // =======================================================================
+
+    // --- Dump Pre-rendered Cache to Binary File ---
+    void song_dump(int id, const std::string& filename) {
+        if(!use_cache_) {
+            std::fprintf(stderr, "[IngameFM] Warning: song_dump called but use_cache_ is false. Nothing to dump.\n");
+            return;
+        }
+        auto it = song_cache_.find(id);
+        if(it == song_cache_.end() || !it->second.valid) {
+            std::fprintf(stderr, "[IngameFM] Error: No cached data found for Song ID %d. Define song first.\n", id);
+            return;
+        }
+        _write_cache_file(filename, it->second.samples, it->second.samples_per_row, it->second.total_rows, 'M'); // 'M' for Music
+    }
+
+    void sfx_dump(int id, const std::string& filename) {
+        if(!use_cache_) {
+            std::fprintf(stderr, "[IngameFM] Warning: sfx_dump called but use_cache_ is false. Nothing to dump.\n");
+            return;
+        }
+        auto it = sfx_cache_.find(id);
+        if(it == sfx_cache_.end() || !it->second.valid) {
+            std::fprintf(stderr, "[IngameFM] Error: No cached data found for SFX ID %d. Define SFX first.\n", id);
+            return;
+        }
+        _write_cache_file(filename, it->second.samples, it->second.samples_per_row, it->second.total_rows, 'S'); // 'S' for SFX
+    }
+
+    // --- Load Pre-rendered Cache from Memory (xxd array) ---
+    // void song_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
+    //     CachedSong cached = _parse_cache_data<CachedSong>(data, len, 'M');
+    //     if(cached.valid) {
+    //         cached.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
+    //         // Recalculate total_rows based on loaded samples to be safe
+    //         if(cached.samples_per_row > 0) {
+    //             cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
+    //         }
+    //         song_cache_[id] = cached;
+            
+    //         // Also register the definition so song_select works logically
+    //         DefinedSong def;
+    //         def.tick_rate = tick_rate;
+    //         def.speed = speed;
+    //         def.samples_per_row = cached.samples_per_row;
+    //         def.cache_key_id = id;
+    //         def.valid = true; 
+    //         // We leave def.song empty/minimal since we rely on cache, 
+    //         // but song_select might check rows.size(). 
+    //         // Let's create a dummy song structure matching the cache dimensions.
+    //         def.song.num_rows = cached.total_rows;
+    //         def.song.num_channels = 0; 
+    //         defined_songs_[id] = std::move(def);
+            
+    //         std::printf("[IngameFM] Loaded Song ID %d from xxd (%d rows, %d samples).\n", id, cached.total_rows, (int)cached.samples.size());
+    //     } else {
+    //         std::fprintf(stderr, "[IngameFM] Failed to parse Song ID %d from xxd data.\n", id);
+    //     }
+    // }
+
+    // void sfx_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
+    //     CachedSfx cached = _parse_cache_data<CachedSfx>(data, len, 'S');
+    //     if(cached.valid) {
+    //         cached.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
+    //         if(cached.samples_per_row > 0) {
+    //             cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
+    //         }
+    //         sfx_cache_[id] = cached;
+
+    //         // Register definition
+    //         SfxDef def;
+    //         def.tick_rate = tick_rate;
+    //         def.speed = speed;
+    //         def.samples_per_row = cached.samples_per_row;
+    //         def.cache_key_id = id;
+    //         def.song.num_rows = cached.total_rows;
+    //         def.song.num_channels = 1; // SFX usually 1 channel
+            
+    //         sfx_defs_[id] = std::move(def);
+    //         sfx_defs_present_[id] = true;
+
+    //         std::printf("[IngameFM] Loaded SFX ID %d from xxd (%d rows, %d samples).\n", id, cached.total_rows, (int)cached.samples.size());
+    //     } else {
+    //         std::fprintf(stderr, "[IngameFM] Failed to parse SFX ID %d from xxd data.\n", id);
+    //     }
+    // }
+        // --- Load Pre-rendered Cache from Memory (xxd array) ---
+    void song_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
+        CachedSong cached = _parse_cache_data<CachedSong>(data, len, 'M');
+        if(cached.valid) {
+            cached.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
+            if(cached.samples_per_row > 0) {
+                cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
+            }
+            song_cache_[id] = cached;
+            
+            // Register definition
+            DefinedSong def;
+            def.tick_rate = tick_rate;
+            def.speed = speed;
+            def.samples_per_row = cached.samples_per_row;
+            def.cache_key_id = id;
+            def.valid = true; 
+            
+            // FIX: Create a dummy song structure that won't crash process_row
+            def.song.num_rows = cached.total_rows;
+            def.song.num_channels = MAX_CHANNELS; // Set to max to be safe
+            
+            // IMPORTANT: Resize the rows vector so accessing [0] doesn't crash
+            // We don't need real events because audio comes from cache, 
+            // but the code expects the vector to exist.
+            def.song.rows.resize(cached.total_rows);
+            for(auto& row : def.song.rows) {
+                row.channels.resize(MAX_CHANNELS);
+                // Fill with NOTE_NONE so if real-time fallback happens, it's silent/safe
+                for(auto& ev : row.channels) {
+                    ev.note = NOTE_NONE;
+                    ev.instrument = -1;
+                    ev.volume = -1;
+                }
+            }
+
+            defined_songs_[id] = std::move(def);
+            
+            std::printf("[IngameFM] Loaded Song ID %d from xxd (%d rows, %d samples).\n", id, cached.total_rows, (int)cached.samples.size());
+        } else {
+            std::fprintf(stderr, "[IngameFM] Failed to parse Song ID %d from xxd data.\n", id);
+        }
+    }
+
+    void sfx_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
+        CachedSfx cached = _parse_cache_data<CachedSfx>(data, len, 'S');
+        if(cached.valid) {
+            cached.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
+            if(cached.samples_per_row > 0) {
+                cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
+            }
+            sfx_cache_[id] = cached;
+
+            // Register definition
+            SfxDef def;
+            def.tick_rate = tick_rate;
+            def.speed = speed;
+            def.samples_per_row = cached.samples_per_row;
+            def.cache_key_id = id;
+            
+            // FIX: Same here, ensure rows vector exists
+            def.song.num_rows = cached.total_rows;
+            def.song.num_channels = 1; 
+            def.song.rows.resize(cached.total_rows);
+            for(auto& row : def.song.rows) {
+                row.channels.resize(1);
+                row.channels[0].note = NOTE_NONE;
+                row.channels[0].instrument = -1;
+                row.channels[0].volume = -1;
+            }
+            
+            sfx_defs_[id] = std::move(def);
+            sfx_defs_present_[id] = true;
+
+            std::printf("[IngameFM] Loaded SFX ID %d from xxd (%d rows, %d samples).\n", id, cached.total_rows, (int)cached.samples.size());
+        } else {
+            std::fprintf(stderr, "[IngameFM] Failed to parse SFX ID %d from xxd data.\n", id);
+        }
+    }
+
     static constexpr int MAX_CHANNELS   = 6;
     static constexpr int MAX_SFX_VOICES = 6;
     static constexpr int SAMPLE_RATE    = 44100;
@@ -881,5 +1049,66 @@ private:
                 process_row(row);
             }
         }
+    }
+    // Helper: Write binary cache to file
+    void _write_cache_file(const std::string& filename, const std::vector<int16_t>& samples, int spr, int rows, char type) {
+        FILE* f = std::fopen(filename.c_str(), "wb");
+        if(!f) {
+            std::perror(("Failed to open " + filename + " for writing").c_str());
+            return;
+        }
+
+        // Header: "IFMC" or "IFSC" (IngameFM Cache / SFX Cache)
+        // [4 bytes Magic] [4 bytes SamplesPerRow] [4 bytes TotalRows] [4 bytes SampleCount] [N bytes Data]
+        char magic[5] = {0};
+        magic[0] = 'I'; magic[1] = 'F'; magic[2] = type; magic[3] = 'C';
+
+        uint32_t u_spr = static_cast<uint32_t>(spr);
+        uint32_t u_rows = static_cast<uint32_t>(rows);
+        uint32_t u_count = static_cast<uint32_t>(samples.size());
+
+        std::fwrite(magic, 1, 4, f);
+        std::fwrite(&u_spr, sizeof(uint32_t), 1, f);
+        std::fwrite(&u_rows, sizeof(uint32_t), 1, f);
+        std::fwrite(&u_count, sizeof(uint32_t), 1, f);
+        if(!samples.empty()) {
+            std::fwrite(samples.data(), sizeof(int16_t), samples.size(), f);
+        }
+        std::fclose(f);
+        std::printf("[IngameFM] Dumped %cache to %s (%d samples)\n", type, filename.c_str(), u_count);
+    }
+
+    // Helper: Parse binary data from memory
+    template<typename T>
+    T _parse_cache_data(const uint8_t* data, size_t len, char expectedType) {
+        T result;
+        result.valid = false;
+
+        if(len < 16) return result; // Too small for header
+
+        // Read Magic
+        if(data[0] != 'I' || data[1] != 'F' || data[2] != expectedType || data[3] != 'C') {
+            std::fprintf(stderr, "[IngameFM] Invalid cache magic header. Expected 'IF%cC'.\n", expectedType);
+            return result;
+        }
+
+        uint32_t spr, rows, count;
+        std::memcpy(&spr, data + 4, sizeof(uint32_t));
+        std::memcpy(&rows, data + 8, sizeof(uint32_t));
+        std::memcpy(&count, data + 12, sizeof(uint32_t));
+
+        size_t expectedBytes = 16 + (count * sizeof(int16_t));
+        if(len < expectedBytes) {
+            std::fprintf(stderr, "[IngameFM] Data truncated. Expected %zu bytes, got %zu.\n", expectedBytes, len);
+            return result;
+        }
+
+        result.samples_per_row = static_cast<int>(spr);
+        result.total_rows = static_cast<int>(rows);
+        result.samples.resize(count);
+        std::memcpy(result.samples.data(), data + 16, count * sizeof(int16_t));
+        result.valid = true;
+
+        return result;
     }
 };
