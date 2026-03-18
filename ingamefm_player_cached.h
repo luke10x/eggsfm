@@ -1,26 +1,10 @@
 #pragma once
 #include <sstream>
 // =============================================================================
-// ingamefm_player.h  — part of ingamefm (header-only)
-//
-// Two-chip architecture:
-//
-//   ym_music_  — runs the Furnace song on channels 0..MAX_CHANNELS-1.
-//                Completely unaware of SFX. Never interrupted.
-//                Output scaled by music_vol_.
-//
-//   ym_sfx_    — a voice pool of sfx_voices_ independent channels (0..N-1).
-//                Channels on ym_sfx_ are completely separate from ym_music_.
-//                SFX grab free/lowest-priority voices and play there.
-//                Output scaled by sfx_vol_.
-//                Only mixed into the output when at least one voice is active,
-//                preventing idle-chip hum.
-//
-// The two chips are generated independently each buffer and summed in float.
+// ingamefm_player.h — Updated to use Integer IDs for Cache Keys
+// Fixes Crash: Ensures chips are initialized before song_select processes rows
 // =============================================================================
-
 #include "ingamefm_patchlib.h"
-
 #include <SDL.h>
 #include <string>
 #include <vector>
@@ -41,14 +25,13 @@ struct IngameFMEvent  { int note; int instrument; int volume; };
 struct IngameFMRow    { std::vector<IngameFMEvent> channels; };
 struct IngameFMSong   { int num_rows=0; int num_channels=0; std::vector<IngameFMRow> rows; };
 
-static std::string trim_right(const std::string& s)
-{
+// --- Helper Functions (Same as before) ---
+static std::string trim_right(const std::string& s) {
     size_t end = s.find_last_not_of(" \t\r\n");
     return (end == std::string::npos) ? "" : s.substr(0, end + 1);
 }
 
-static int parse_note_field(const char* nc, int line_num)
-{
+static int parse_note_field(const char* nc, int line_num) {
     if (nc[0]=='.'&&nc[1]=='.'&&nc[2]=='.') return NOTE_NONE;
     if (nc[0]=='O'&&nc[1]=='F'&&nc[2]=='F') return NOTE_OFF;
     int semitone = -1;
@@ -66,8 +49,7 @@ static int parse_note_field(const char* nc, int line_num)
     return 12 + (nc[2]-'0')*12 + semitone;
 }
 
-static int parse_hex2(const char* p, int line_num, const char* field_name)
-{
+static int parse_hex2(const char* p, int line_num, const char* field_name) {
     if (p[0]=='.'&&p[1]=='.') return -1;
     auto hex = [&](char c) -> int {
         if (c>='0'&&c<='9') return c-'0';
@@ -79,8 +61,7 @@ static int parse_hex2(const char* p, int line_num, const char* field_name)
     return hex(p[0])*16+hex(p[1]);
 }
 
-static IngameFMEvent parse_channel_column(const std::string& row, size_t colStart, size_t colWidth, int line_num)
-{
+static IngameFMEvent parse_channel_column(const std::string& row, size_t colStart, size_t colWidth, int line_num) {
     IngameFMEvent ev; ev.note=NOTE_NONE; ev.instrument=-1; ev.volume=-1;
     std::string col = row.substr(colStart, colWidth);
     while (col.size()<colWidth) col+='.';
@@ -90,8 +71,7 @@ static IngameFMEvent parse_channel_column(const std::string& row, size_t colStar
     return ev;
 }
 
-static IngameFMSong parse_ingamefm_song(const std::string& text)
-{
+static IngameFMSong parse_ingamefm_song(const std::string& text) {
     std::vector<std::string> lines;
     { std::istringstream ss(text); std::string l; while(std::getline(ss,l)) lines.push_back(trim_right(l)); }
     while (!lines.empty()&&lines.front().empty()) lines.erase(lines.begin());
@@ -100,24 +80,29 @@ static IngameFMSong parse_ingamefm_song(const std::string& text)
     if (lines[0].find("org.tildearrow.furnace")!=std::string::npos) { lines.erase(lines.begin()); lineNum++; }
     while (!lines.empty()&&lines.front().empty()) { lines.erase(lines.begin()); lineNum++; }
     if (lines.empty()) throw std::runtime_error("Song text has no content after header");
+    
     int num_rows=0;
     { const std::string& rc=lines[0]; char* e=nullptr; long v=std::strtol(rc.c_str(),&e,10);
       while(e&&*e==' ')e++; if(!e||*e!='\0') throw std::runtime_error("Line "+std::to_string(lineNum)+": expected row count");
       if(v<=0||v>65536) throw std::runtime_error("Line "+std::to_string(lineNum)+": row count out of range");
       num_rows=static_cast<int>(v); lines.erase(lines.begin()); lineNum++; }
+    
     IngameFMSong song; song.num_rows=num_rows;
     std::vector<std::string> dataLines;
     for (const auto& l:lines) if(!l.empty()) dataLines.push_back(l);
     if (dataLines.empty()) throw std::runtime_error("Song has row count but no data lines");
+    
     auto split_channels=[](const std::string& row)->std::vector<std::string>{
         std::vector<std::string> cols; std::string cur;
         for(char c:row){ if(c=='|'){cols.push_back(cur);cur.clear();}else cur+=c; }
         if(!cur.empty()) cols.push_back(cur); return cols; };
+    
     std::vector<std::string> firstCols=split_channels(dataLines[0]);
     song.num_channels=static_cast<int>(firstCols.size());
     std::vector<size_t> colWidths; for(const auto& c:firstCols) colWidths.push_back(c.size());
     for(int ch=0;ch<song.num_channels;ch++)
         if(colWidths[ch]<7) throw std::runtime_error("Channel "+std::to_string(ch)+" too narrow");
+    
     int parsedRows=0;
     for(const auto& line:dataLines) {
         if(parsedRows>=num_rows) break;
@@ -126,20 +111,13 @@ static IngameFMSong parse_ingamefm_song(const std::string& text)
         for(int ch=0;ch<song.num_channels;ch++) {
             std::string col=cols[ch]; while(col.size()<colWidths[ch]) col+='.';
             row.channels.push_back(parse_channel_column(col,0,colWidths[ch],lineNum)); }
-        song.rows.push_back(row); parsedRows++; lineNum++; }
+        song.rows.push_back(row); parsedRows++; lineNum++; 
+    }
     if(parsedRows<num_rows) throw std::runtime_error("Song declared "+std::to_string(num_rows)+" rows but found "+std::to_string(parsedRows));
     return song;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Channel state (music player)
-// ─────────────────────────────────────────────────────────────────────────────
-
 struct IngameFMChannelState { bool active=false; int instrument=0; int volume=0x7F; };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SFX voice state — one per voice slot on ym_sfx_
-// ─────────────────────────────────────────────────────────────────────────────
 
 struct SfxVoiceState {
     int  sfx_id=-1; int priority=0; int ticks_remaining=0;
@@ -147,134 +125,146 @@ struct SfxVoiceState {
     bool pending_has_note=false; bool pending_is_off=false;
     int  pending_note=0; int pending_inst=0; int pending_vol=0x7F;
     int  last_instrument=0; int last_volume=0x7F;
-    const void* cache_key = nullptr; // Cache key for pre-rendered audio lookup
+    int  cache_key_id = -1; // CHANGED: Store ID instead of pointer
     bool active() const { return sfx_id>=0 && ticks_remaining>0; }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Song-change timing
-// ─────────────────────────────────────────────────────────────────────────────
-
-enum class SongChangeWhen {
-    NOW,            // Switch immediately on the next audio buffer
-    AT_PATTERN_END  // Wait until the current song reaches its last row, then switch
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// IngameFMPlayer
-// ─────────────────────────────────────────────────────────────────────────────
+enum class SongChangeWhen { NOW, AT_PATTERN_END };
 
 class IngameFMPlayer
 {
 public:
-    // Maximum channels for the music player (all on ym_music_)
-    static constexpr int MAX_CHANNELS  = 6;
-    // Maximum voices available for SFX (all on ym_sfx_)
+    static constexpr int MAX_CHANNELS   = 6;
     static constexpr int MAX_SFX_VOICES = 6;
+    static constexpr int SAMPLE_RATE    = 44100;
 
-    // ── Volume ───────────────────────────────────────────────────────────────
-    // 0.0 = silent, 1.0 = full. Thread-safe, no lock needed.
     void set_music_volume(float v) { music_vol_.store(std::max(0.f,std::min(1.f,v))); }
     void set_sfx_volume  (float v) { sfx_vol_  .store(std::max(0.f,std::min(1.f,v))); }
 
-    // ── Song setup ───────────────────────────────────────────────────────────
-    void set_song(const std::string& text, int tick_rate, int speed)
-    {
-        if(tick_rate<=0) throw std::runtime_error("tick_rate must be > 0");
-        if(speed<=0)     throw std::runtime_error("speed must be > 0");
-        song_=parse_ingamefm_song(text); tick_rate_=tick_rate; speed_=speed;
-        samples_per_row_=static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate_*speed_);
-        
-        // Cache pre-rendered audio using text data pointer as cache key
-        if(use_cache_) {
-            const void* key = static_cast<const void*>(text.data());
-            if(song_cache_.find(key) == song_cache_.end()) {
-                song_cache_[key] = prerender_song(song_, tick_rate_, speed_, patches_, patches_present_);
-            }
-            current_song_cache_key_ = key;
-        }
-    }
-
-    void add_patch(int instrument_id, const YM2612Patch& patch)
-    {
+    void add_patch(int instrument_id, const YM2612Patch& patch) {
         if(instrument_id<0||instrument_id>255) throw std::runtime_error("instrument_id must be 0-255");
-        patches_[instrument_id]=patch; patches_present_[instrument_id]=true;
+        patches_[instrument_id]=patch; 
+        patches_present_[instrument_id]=true;
     }
 
-    // ── Song change (call with audio device locked or before start) ─────────────
-    // Queues a song change. The new song is pre-parsed from text immediately
-    // (throws on parse error). Actual switch happens according to `when`:
-    //   NOW           — at the start of the next audio buffer
-    //   AT_PATTERN_END — after the current song finishes its last row
-    // `start_row` is clamped to the new song's row count.
-    void change_song(const std::string& text, int tick_rate, int speed,
-                     SongChangeWhen when = SongChangeWhen::AT_PATTERN_END,
-                     int start_row = 0)
-    {
+    // ── Song Definition ──────────────────────────────────────────────────────
+    void song_define(int id, const std::string& text, int tick_rate, int speed) {
         if(tick_rate<=0) throw std::runtime_error("tick_rate must be > 0");
         if(speed<=0)     throw std::runtime_error("speed must be > 0");
+
+        DefinedSong def;
+        def.song = parse_ingamefm_song(text);
+        def.tick_rate = tick_rate;
+        def.speed = speed;
+        def.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
+        def.valid = true;
+        def.cache_key_id = id; // CHANGED: Use ID as cache key
+
+        if(use_cache_) {
+            // Check if already cached by ID
+            if(song_cache_.find(id) == song_cache_.end()) {
+                song_cache_[id] = prerender_song(def.song, tick_rate, speed, patches_, patches_present_);
+            }
+        }
+        defined_songs_[id] = std::move(def);
+    }
+
+    // ── Song Selection ───────────────────────────────────────────────────────
+    void song_select(int id, bool loop = false) {
+        auto it = defined_songs_.find(id);
+        if(it == defined_songs_.end()) {
+            throw std::runtime_error("song_select: ID " + std::to_string(id) + " not defined.");
+        }
+        const DefinedSong& def = it->second;
+
+        // FIX: Ensure chips are initialized BEFORE calling process_row/key_off
+        // If start() hasn't been called yet, ym_music_ is null. We must create it now.
+        if(!ym_music_) {
+            ym_music_ = std::make_unique<IngameFMChip>();
+            ym_sfx_   = std::make_unique<IngameFMChip>();
+            // Enable L+R output
+            for(int c=0;c<3;++c) {
+                ym_music_->write(0,0xB4+c,0xC0); ym_music_->write(1,0xB4+c,0xC0);
+                ym_sfx_  ->write(0,0xB4+c,0xC0); ym_sfx_  ->write(1,0xB4+c,0xC0);
+            }
+        }
+
+        // Stop current music cleanly
+        for(int ch=0; ch<MAX_CHANNELS; ch++) ym_music_->key_off(ch);
+
+        // Update state
+        song_ = def.song;
+        tick_rate_ = def.tick_rate;
+        speed_ = def.speed;
+        samples_per_row_ = def.samples_per_row;
+        current_song_cache_key_id_ = def.cache_key_id; // CHANGED
+        current_song_id_ = id;
+
+        loop_ = loop;
+        current_row_.store(0);
+        sample_in_row_ = 0;
+        finished_.store(false);
+        pending_song_.pending = false;
+
+        for(auto& c : ch_state_) c = IngameFMChannelState{};
+        for(auto& p : pending_)  p = {};
+
+        // Now safe to call process_row since ym_music_ exists
+        process_row(0);
+        commit_keyon();
+        sample_in_row_ = KEY_OFF_GAP_SAMPLES;
+    }
+
+    // ── Song Change ──────────────────────────────────────────────────────────
+    void change_song(int id, SongChangeWhen when = SongChangeWhen::AT_PATTERN_END, int start_row = 0) {
+        auto it = defined_songs_.find(id);
+        if(it == defined_songs_.end()) {
+            throw std::runtime_error("change_song: ID " + std::to_string(id) + " not defined.");
+        }
+        const DefinedSong& def = it->second;
+
         PendingSong ps;
-        ps.song            = parse_ingamefm_song(text);
-        ps.tick_rate       = tick_rate;
-        ps.speed           = speed;
-        ps.samples_per_row = static_cast<int>(
-            static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
-        ps.start_row       = std::max(0, std::min(start_row,
-                                 static_cast<int>(ps.song.rows.size())-1));
+        ps.song            = def.song;
+        ps.tick_rate       = def.tick_rate;
+        ps.speed           = def.speed;
+        ps.samples_per_row = def.samples_per_row;
+        ps.start_row       = std::max(0, std::min(start_row, static_cast<int>(ps.song.rows.size())-1));
         ps.when            = when;
         ps.pending         = true;
-        
-        // Cache pre-rendered audio for pending song
-        if(use_cache_) {
-            const void* key = static_cast<const void*>(text.data());
-            if(song_cache_.find(key) == song_cache_.end()) {
-                song_cache_[key] = prerender_song(ps.song, tick_rate, speed, patches_, patches_present_);
-            }
-            ps.cache_key = key;
-        }
-        pending_song_      = std::move(ps);
+        ps.cache_key_id    = def.cache_key_id; // CHANGED
+
+        pending_song_ = std::move(ps);
     }
 
-    // Returns the current playback row. Thread-safe (atomic read).
     int get_current_row()  const { return current_row_.load(); }
-
-    // Returns the total number of rows in the currently playing song.
-    // Call with audio device locked (reads song_ without synchronisation).
     int get_song_length()  const { return static_cast<int>(song_.rows.size()); }
 
-    // ── SFX setup ────────────────────────────────────────────────────────────
-    // sfx_set_voices(n): how many voices ym_sfx_ exposes for SFX (1..MAX_SFX_VOICES).
-    // Default 3. Call before start().
-    void sfx_set_voices(int n)
-    {
+    void sfx_set_voices(int n) {
         if(n<1||n>MAX_SFX_VOICES) throw std::runtime_error("sfx_set_voices: n must be 1.."+std::to_string(MAX_SFX_VOICES));
         sfx_voices_=n;
     }
 
-    // sfx_define: pre-parse an SFX pattern. May be called at any time.
-    void sfx_define(int id, const std::string& pattern, int tick_rate, int speed)
-    {
+    void sfx_define(int id, const std::string& pattern, int tick_rate, int speed) {
         if(id<0||id>255) throw std::runtime_error("sfx_define: id must be 0-255");
         if(tick_rate<=0||speed<=0) throw std::runtime_error("sfx_define: tick_rate and speed must be > 0");
-        SfxDef def; def.song=parse_ingamefm_song(pattern); def.tick_rate=tick_rate; def.speed=speed;
-        def.samples_per_row=static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
         
-        // Cache pre-rendered SFX using pattern data pointer as cache key
+        SfxDef def; 
+        def.song=parse_ingamefm_song(pattern); 
+        def.tick_rate=tick_rate; 
+        def.speed=speed;
+        def.samples_per_row=static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
+        def.cache_key_id = id; // CHANGED
+        
         if(use_cache_) {
-            const void* key = static_cast<const void*>(pattern.data());
-            // Only cache if not already present
-            if(sfx_cache_.find(key) == sfx_cache_.end()) {
-                sfx_cache_[key] = prerender_sfx(def.song, tick_rate, speed, patches_, patches_present_);
+            if(sfx_cache_.find(id) == sfx_cache_.end()) {
+                sfx_cache_[id] = prerender_sfx(def.song, tick_rate, speed, patches_, patches_present_);
             }
-            def.cache_key = key;
         }
-        sfx_defs_[id]=std::move(def); 
+        sfx_defs_[id]=std::move(def);
         sfx_defs_present_[id]=true;
     }
 
-    // ── Playback ─────────────────────────────────────────────────────────────
-    void play(bool loop=false)
-    {
+    void play(bool loop=false) {
         if(song_.rows.empty()) throw std::runtime_error("No song loaded");
         reset_state(loop);
         SDL_AudioSpec desired{}; desired.freq=SAMPLE_RATE; desired.format=AUDIO_S16SYS;
@@ -287,50 +277,65 @@ public:
         SDL_CloseAudioDevice(dev);
     }
 
-    void start(SDL_AudioDeviceID dev, bool loop=false)
-    {
+    void start(SDL_AudioDeviceID dev, bool loop=false) {
+        // Note: song_select should have been called before this, which initializes chips.
+        // But if user calls start without select, we init here to be safe.
+        if(!ym_music_) {
+             ym_music_ = std::make_unique<IngameFMChip>();
+             ym_sfx_   = std::make_unique<IngameFMChip>();
+             for(int c=0;c<3;++c) {
+                ym_music_->write(0,0xB4+c,0xC0); ym_music_->write(1,0xB4+c,0xC0);
+                ym_sfx_  ->write(0,0xB4+c,0xC0); ym_sfx_  ->write(1,0xB4+c,0xC0);
+            }
+        }
+        
         if(song_.rows.empty()) throw std::runtime_error("No song loaded");
-        SDL_LockAudioDevice(dev); reset_state(loop); SDL_UnlockAudioDevice(dev);
+        SDL_LockAudioDevice(dev); 
+        // Only reset counters/timers, don't recreate chips if they exist
+        loop_=loop; current_row_.store(0); sample_in_row_=0; finished_.store(false); pending_song_.pending=false;
+        for(auto& c:ch_state_) c=IngameFMChannelState{};
+        for(auto& p:pending_)  p={};
+        for(auto& v:sfx_voice_) v=SfxVoiceState{};
+        // Re-init registers just in case
+        for(int c=0;c<3;++c) {
+            ym_music_->write(0,0xB4+c,0xC0); ym_music_->write(1,0xB4+c,0xC0);
+            ym_sfx_  ->write(0,0xB4+c,0xC0); ym_sfx_  ->write(1,0xB4+c,0xC0);
+        }
+        if(!song_.rows.empty()) {
+            process_row(0);
+            commit_keyon();
+            sample_in_row_=KEY_OFF_GAP_SAMPLES;
+        }
+        SDL_UnlockAudioDevice(dev);
     }
 
-    void stop(SDL_AudioDeviceID dev)
-    {
+    void stop(SDL_AudioDeviceID dev) {
         SDL_LockAudioDevice(dev);
         finished_.store(true);
-        for(int ch=0;ch<MAX_CHANNELS;ch++) if(ym_music_) ym_music_->key_off(ch);
-        for(int v=0;v<sfx_voices_;v++)     if(ym_sfx_)   ym_sfx_->key_off(v);
+        if(ym_music_) for(int ch=0;ch<MAX_CHANNELS;ch++) ym_music_->key_off(ch);
+        if(ym_sfx_)   for(int v=0;v<sfx_voices_;v++)     ym_sfx_->key_off(v);
         SDL_UnlockAudioDevice(dev);
     }
 
     bool is_finished() const { return finished_.load(); }
-
-    // Direct chip access for manual note triggers outside the song/SFX systems.
-    // Always lock the SDL audio device first.
     IngameFMChip* chip() { return ym_music_.get(); }
 
-    // ── SFX trigger ──────────────────────────────────────────────────────────
-    // Call with the SDL audio device locked.
-    // Scans ym_sfx_ voice pool right-to-left: picks free voice first,
-    // then lowest-priority active voice if all busy.
-    void sfx_play(int id, int priority, int duration_ticks)
-    {
+    void sfx_play(int id, int priority, int duration_ticks) {
         if(!sfx_defs_present_[id]) return;
         if(sfx_voices_==0)         return;
         if(!ym_sfx_)               return;
-
+        
         const SfxDef& def = sfx_defs_[id];
         int best_v = -1, best_prio = priority;
-
+        
         for(int v=sfx_voices_-1; v>=0; --v) {
             if(!sfx_voice_[v].active()) { best_v=v; best_prio=-1; break; }
             if(sfx_voice_[v].priority < best_prio) { best_v=v; best_prio=sfx_voice_[v].priority; }
         }
         if(best_v<0) return;
 
-        // Silence whatever was on this voice
         ym_sfx_->key_off(best_v);
-
-        // Set up voice state
+        
         SfxVoiceState& vs = sfx_voice_[best_v];
         vs.sfx_id          = id;
         vs.priority        = priority;
@@ -342,37 +347,44 @@ public:
         vs.pending_is_off  = false;
         vs.last_instrument = 0;
         vs.last_volume     = 0x7F;
-        vs.cache_key       = def.cache_key; // Store cache key for this voice
+        vs.cache_key_id    = def.cache_key_id; // CHANGED
 
-        // Fire row 0 immediately (skip_keyoff: eviction already did it)
         sfx_process_row(best_v, 0, true);
         sfx_commit_keyon(best_v);
         vs.sample_in_row = KEY_OFF_GAP_SAMPLES;
     }
 
-    static void s_audio_callback(void* userdata, Uint8* stream, int len)
-    {
+    static void s_audio_callback(void* userdata, Uint8* stream, int len) {
         static_cast<IngameFMPlayer*>(userdata)->audio_callback(
             reinterpret_cast<int16_t*>(stream), len/4);
     }
 
-    static constexpr int SAMPLE_RATE = 44100;
+    bool use_cache_ = false;
 
 private:
-    // ── SFX definitions ──────────────────────────────────────────────────────
-    struct SfxDef { 
-        IngameFMSong song; 
-        int tick_rate=60; 
-        int speed=6; 
+    struct DefinedSong {
+        IngameFMSong song;
+        int tick_rate = 60;
+        int speed = 6;
+        int samples_per_row = 0;
+        int cache_key_id = -1; // CHANGED
+        bool valid = false;
+    };
+    std::unordered_map<int, DefinedSong> defined_songs_;
+    int current_song_id_ = -1;
+
+    struct SfxDef {
+        IngameFMSong song;
+        int tick_rate=60;
+        int speed=6;
         int samples_per_row=0;
-        const void* cache_key = nullptr; // Cache key for pre-rendered audio
+        int cache_key_id = -1; // CHANGED
     };
     std::array<SfxDef, 256>         sfx_defs_{};
     std::array<bool,   256>         sfx_defs_present_{};
     int                             sfx_voices_ = 3;
     std::array<SfxVoiceState, MAX_SFX_VOICES> sfx_voice_{};
 
-    // ── Music state ──────────────────────────────────────────────────────────
     IngameFMSong song_;
     int  tick_rate_=60, speed_=6, samples_per_row_=0;
     std::atomic<int> current_row_{0};
@@ -382,11 +394,10 @@ private:
     std::array<IngameFMChannelState, MAX_CHANNELS> ch_state_{};
     std::array<YM2612Patch, 256>  patches_{};
     std::array<bool, 256>         patches_present_{};
-
+    
     struct PendingNote { bool has_note=false; bool is_off=false; int midi_note=0; int instId=0; int volume=0x7F; };
     std::array<PendingNote, MAX_CHANNELS> pending_{};
 
-    // ── Pending song change ──────────────────────────────────────────────────
     struct PendingSong {
         IngameFMSong   song;
         int            tick_rate       = 60;
@@ -395,83 +406,72 @@ private:
         int            start_row       = 0;
         SongChangeWhen when            = SongChangeWhen::AT_PATTERN_END;
         bool           pending         = false;
-        const void*    cache_key       = nullptr; // Cache key for pre-rendered audio
+        int            cache_key_id    = -1; // CHANGED
     };
     PendingSong pending_song_{};
 
-    // ── Chips ────────────────────────────────────────────────────────────────
     std::unique_ptr<IngameFMChip> ym_music_;
     std::unique_ptr<IngameFMChip> ym_sfx_;
     std::atomic<float> music_vol_{1.0f};
     std::atomic<float> sfx_vol_  {1.0f};
-
     static constexpr int KEY_OFF_GAP_SAMPLES = 44;
 
-    // ── Pre-rendered audio cache ─────────────────────────────────────────────
     struct CachedSong {
-        std::vector<int16_t> samples; // interleaved stereo: [L0,R0,L1,R1,...]
+        std::vector<int16_t> samples; 
         int samples_per_row = 0;
         int total_rows = 0;
         bool valid = false;
     };
     struct CachedSfx {
-        std::vector<int16_t> samples; // interleaved stereo
+        std::vector<int16_t> samples; 
         int samples_per_row = 0;
         int total_rows = 0;
         bool valid = false;
     };
-    std::unordered_map<const void*, CachedSong> song_cache_;
-    std::unordered_map<const void*, CachedSfx> sfx_cache_;
-    bool use_cache_ = true;
-    const void* current_song_cache_key_ = nullptr;
+    // CHANGED: Map uses int ID as key
+    std::unordered_map<int, CachedSong> song_cache_;
+    std::unordered_map<int, CachedSfx> sfx_cache_;
+    int current_song_cache_key_id_ = -1;
 
-    // ── Init ─────────────────────────────────────────────────────────────────
-    void reset_state(bool loop)
-    {
+    void reset_state(bool loop) {
+        // Only create chips if they don't exist
+        if(!ym_music_) {
+            ym_music_=std::make_unique<IngameFMChip>();
+            ym_sfx_  =std::make_unique<IngameFMChip>();
+            for(int c=0;c<3;++c) {
+                ym_music_->write(0,0xB4+c,0xC0); ym_music_->write(1,0xB4+c,0xC0);
+                ym_sfx_  ->write(0,0xB4+c,0xC0); ym_sfx_  ->write(1,0xB4+c,0xC0);
+            }
+        }
         loop_=loop; current_row_.store(0); sample_in_row_=0; finished_.store(false); pending_song_.pending=false;
         for(auto& c:ch_state_) c=IngameFMChannelState{};
         for(auto& p:pending_)  p={};
         for(auto& v:sfx_voice_) v=SfxVoiceState{};
-        ym_music_=std::make_unique<IngameFMChip>();
-        ym_sfx_  =std::make_unique<IngameFMChip>();
-        // ymfm defaults 0xB4 to 0 (both channels muted). Enable L+R everywhere.
-        for(int c=0;c<3;++c) {
-            ym_music_->write(0,0xB4+c,0xC0); ym_music_->write(1,0xB4+c,0xC0);
-            ym_sfx_  ->write(0,0xB4+c,0xC0); ym_sfx_  ->write(1,0xB4+c,0xC0);
+        
+        if(!song_.rows.empty()) {
+            process_row(0);
+            commit_keyon();
+            sample_in_row_=KEY_OFF_GAP_SAMPLES;
         }
-        process_row(0);
-        commit_keyon();
-        sample_in_row_=KEY_OFF_GAP_SAMPLES;
     }
 
-    // ── Pre-rendering helpers (static, defined inline for header-only) ───────
     static CachedSong prerender_song(const IngameFMSong& song, int tick_rate, int speed,
-                                    const std::array<YM2612Patch,256>& patches,
-                                    const std::array<bool,256>& patches_present)
-    {
+                                     const std::array<YM2612Patch,256>& patches,
+                                     const std::array<bool,256>& patches_present) {
         CachedSong result;
         if(song.rows.empty()) return result;
-        
         int samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
         int total_samples = song.num_rows * samples_per_row;
-        result.samples.resize(total_samples * 2); // stereo interleaved
+        result.samples.resize(total_samples * 2); 
         result.samples_per_row = samples_per_row;
         result.total_rows = song.num_rows;
         result.valid = true;
-        
-        // Temporary chip for rendering
+
         IngameFMChip chip;
-        // Enable L+R output on all channels (same as reset_state)
-        for(int c=0;c<3;++c) {
-            chip.write(0,0xB4+c,0xC0);
-            chip.write(1,0xB4+c,0xC0);
-        }
-        
-        // Channel state tracking (same as music player)
+        for(int c=0;c<3;++c) { chip.write(0,0xB4+c,0xC0); chip.write(1,0xB4+c,0xC0); }
         std::array<IngameFMChannelState, MAX_CHANNELS> ch_state{};
         std::array<PendingNote, MAX_CHANNELS> pending{};
-        
-        // Render row by row
+
         for(int rowIdx=0; rowIdx<song.num_rows; ++rowIdx) {
             // Progress Logging (Every 10%)
             int total = song.num_rows;
@@ -485,8 +485,6 @@ private:
             }
             const IngameFMRow& row = song.rows[rowIdx];
             int numCh = std::min((int)row.channels.size(), MAX_CHANNELS);
-            
-            // Process events for this row (same as process_row)
             for(int ch=0;ch<numCh;ch++) {
                 const IngameFMEvent& ev=row.channels[ch];
                 pending[ch]={};
@@ -500,12 +498,8 @@ private:
                     pending[ch].instId=ch_state[ch].instrument; pending[ch].volume=ch_state[ch].volume;
                 }
             }
-            
-            // Generate samples for this row
             for(int sample_in_row=0; sample_in_row<samples_per_row; ++sample_in_row) {
-                // Handle KEY_OFF_GAP_SAMPLES delay before committing keyons
                 if(sample_in_row == KEY_OFF_GAP_SAMPLES) {
-                    // Commit pending keyons (same as commit_keyon)
                     for(int ch=0;ch<MAX_CHANNELS;ch++) {
                         if(!pending[ch].has_note) continue;
                         int instId=pending[ch].instId;
@@ -518,43 +512,31 @@ private:
                         ch_state[ch].active=true; pending[ch].has_note=false;
                     }
                 }
-                
-                // Generate one sample frame (stereo)
                 int16_t frame[2];
                 chip.generate(frame, 1);
-                
-                // Store in output buffer
                 int out_idx = (rowIdx * samples_per_row + sample_in_row) * 2;
                 result.samples[out_idx] = frame[0];
                 result.samples[out_idx+1] = frame[1];
             }
         }
-        
         return result;
     }
-    
+
     static CachedSfx prerender_sfx(const IngameFMSong& song, int tick_rate, int speed,
-                                  const std::array<YM2612Patch,256>& patches,
-                                  const std::array<bool,256>& patches_present)
-    {
+                                   const std::array<YM2612Patch,256>& patches,
+                                   const std::array<bool,256>& patches_present) {
         CachedSfx result;
         if(song.rows.empty()) return result;
-        
         int samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
         int total_samples = song.num_rows * samples_per_row;
-        result.samples.resize(total_samples * 2); // stereo interleaved
+        result.samples.resize(total_samples * 2); 
         result.samples_per_row = samples_per_row;
         result.total_rows = song.num_rows;
         result.valid = true;
-        
-        // Temporary chip for rendering (SFX uses single channel 0)
+
         IngameFMChip chip;
-        for(int c=0;c<3;++c) {
-            chip.write(0,0xB4+c,0xC0);
-            chip.write(1,0xB4+c,0xC0);
-        }
+        for(int c=0;c<3;++c) { chip.write(0,0xB4+c,0xC0); chip.write(1,0xB4+c,0xC0); }
         
-        // SFX voice state tracking (simplified, single channel)
         int current_instrument = 0;
         int current_volume = 0x7F;
         bool pending_has_note = false;
@@ -562,8 +544,7 @@ private:
         int pending_note = 0;
         int pending_inst = 0;
         int pending_vol = 0x7F;
-        
-        // Render row by row
+
         for(int rowIdx=0; rowIdx<song.num_rows; ++rowIdx) {
             // Progress Logging (Every 10%)
             int total = song.num_rows;
@@ -576,7 +557,6 @@ private:
                 }
             }
             const IngameFMRow& row = song.rows[rowIdx];
-            // SFX patterns use channel 0 only
             if(!row.channels.empty()) {
                 const IngameFMEvent& ev = row.channels[0];
                 if(ev.instrument>=0) current_instrument=ev.instrument;
@@ -591,10 +571,7 @@ private:
                     pending_is_off=false;
                 }
             }
-            
-            // Generate samples for this row
             for(int sample_in_row=0; sample_in_row<samples_per_row; ++sample_in_row) {
-                // Handle KEY_OFF_GAP_SAMPLES delay
                 if(sample_in_row == KEY_OFF_GAP_SAMPLES) {
                     if(pending_has_note) {
                         if(patches_present[pending_inst]) {
@@ -606,24 +583,17 @@ private:
                         pending_has_note=false;
                     }
                 }
-                
-                // Generate one sample frame
                 int16_t frame[2];
                 chip.generate(frame, 1);
-                
                 int out_idx = (rowIdx * samples_per_row + sample_in_row) * 2;
                 result.samples[out_idx] = frame[0];
                 result.samples[out_idx+1] = frame[1];
             }
         }
-        
         return result;
     }
 
-    // ── Music player helpers ──────────────────────────────────────────────────
-    // Helper: scale carrier TLs by per-note volume, return modified patch copy.
-    static YM2612Patch apply_volume(const YM2612Patch& src, int vol)
-    {
+    static YM2612Patch apply_volume(const YM2612Patch& src, int vol) {
         YM2612Patch p=src;
         int tl_add=((0x7F-vol)*127)/0x7F;
         bool isCarrier[4]={false,false,false,false};
@@ -637,17 +607,12 @@ private:
         return p;
     }
 
-    // Apply a pending song change immediately.
-    // Silences all music channels, swaps song state, restarts from start_row.
-    // Must be called from the audio callback (already under audio lock).
-    void apply_pending_song()
-    {
+    void apply_pending_song() {
         PendingSong& ps = pending_song_;
-        // Silence all music channels cleanly
         for(int ch=0;ch<MAX_CHANNELS;ch++) ym_music_->key_off(ch);
         for(auto& c:ch_state_) c=IngameFMChannelState{};
         for(auto& p:pending_)  p={};
-        // Swap in new song
+        
         song_            = std::move(ps.song);
         tick_rate_       = ps.tick_rate;
         speed_           = ps.speed;
@@ -656,16 +621,15 @@ private:
         sample_in_row_   = 0;
         finished_.store(false);
         ps.pending       = false;
-        // Update cache key for new song
-        current_song_cache_key_ = ps.cache_key;
-        // Fire first row immediately (with gap so key_on lands cleanly)
+        current_song_cache_key_id_ = ps.cache_key_id; // CHANGED
+        current_song_id_ = -1;
+
         process_row(current_row_.load());
         commit_keyon();
         sample_in_row_   = KEY_OFF_GAP_SAMPLES;
     }
 
-    void process_row(int rowIdx)
-    {
+    void process_row(int rowIdx) {
         if(rowIdx>=(int)song_.rows.size()) return;
         const IngameFMRow& row=song_.rows[rowIdx];
         int numCh=std::min((int)row.channels.size(),MAX_CHANNELS);
@@ -684,8 +648,7 @@ private:
         }
     }
 
-    void commit_keyon()
-    {
+    void commit_keyon() {
         for(int ch=0;ch<MAX_CHANNELS;ch++) {
             if(!pending_[ch].has_note) continue;
             int instId=pending_[ch].instId;
@@ -699,11 +662,7 @@ private:
         }
     }
 
-    // ── SFX voice pool helpers ────────────────────────────────────────────────
-    // Voice index v is a slot on ym_sfx_ (0..sfx_voices_-1), NOT a music channel.
-
-    void sfx_process_row(int v, int rowIdx, bool skip_keyoff=false)
-    {
+    void sfx_process_row(int v, int rowIdx, bool skip_keyoff=false) {
         SfxVoiceState& vs=sfx_voice_[v];
         const SfxDef& def=sfx_defs_[vs.sfx_id];
         vs.pending_has_note=false; vs.pending_is_off=false;
@@ -719,8 +678,7 @@ private:
         }
     }
 
-    void sfx_commit_keyon(int v)
-    {
+    void sfx_commit_keyon(int v) {
         SfxVoiceState& vs=sfx_voice_[v];
         if(!vs.pending_has_note) return;
         if(patches_present_[vs.pending_inst]) {
@@ -732,8 +690,7 @@ private:
         vs.pending_has_note=false;
     }
 
-    void sfx_tick_voice(int v, int samples)
-    {
+    void sfx_tick_voice(int v, int samples) {
         SfxVoiceState& vs=sfx_voice_[v];
         if(!vs.active()) return;
         const SfxDef& def=sfx_defs_[vs.sfx_id];
@@ -753,189 +710,171 @@ private:
             }
         }
     }
-
-    // ── Audio callback ────────────────────────────────────────────────────────
-
-    void audio_callback(int16_t* stream, int samples)
-    {
+    void audio_callback(int16_t* stream, int samples) {
         if(finished_.load()) { std::memset(stream,0,samples*4); return; }
-
-        // Check for an immediate song change before generating anything
+        
         if(pending_song_.pending && pending_song_.when==SongChangeWhen::NOW)
             apply_pending_song();
 
         int remaining=samples;
         int16_t* out=stream;
-
+        
         while(remaining>0) {
             int pos_in_row=sample_in_row_;
             bool in_gap=pos_in_row<KEY_OFF_GAP_SAMPLES;
             int next_boundary=in_gap?KEY_OFF_GAP_SAMPLES:samples_per_row_;
             int to_generate=std::min(remaining,next_boundary-pos_in_row);
 
-            // ── Generate music ───────────────────────────────────────────────
             const float mv=music_vol_.load();
-            const int   n =to_generate*2;
-            
-            // Try to use cached music audio for maximum performance
+            const int   n = to_generate*2;
             bool used_cached_music = false;
-            if(use_cache_ && current_song_cache_key_) {
-                auto it = song_cache_.find(current_song_cache_key_);
+            
+            // --- MUSIC PATH ---
+            if(use_cache_ && current_song_cache_key_id_ >= 0) {
+                // Check if cache exists; if not, try to generate it on-demand (safety net)
+                auto it = song_cache_.find(current_song_cache_key_id_);
+                if(it == song_cache_.end() && defined_songs_.count(current_song_cache_key_id_)) {
+                    // Cache miss but definition exists: Populate now!
+                    const DefinedSong& def = defined_songs_[current_song_cache_key_id_];
+                    std::printf("[IngameFM] Cache Miss (Music ID %d): Generating on-demand...\n", current_song_cache_key_id_);
+                    song_cache_[current_song_cache_key_id_] = prerender_song(def.song, def.tick_rate, def.speed, patches_, patches_present_);
+                    it = song_cache_.find(current_song_cache_key_id_);
+                }
+
                 if(it != song_cache_.end() && it->second.valid) {
                     const CachedSong& cached = it->second;
                     int start_offset = (current_row_.load() * cached.samples_per_row + pos_in_row) * 2;
-                    // Bounds check before memcpy
                     if(start_offset + n <= static_cast<int>(cached.samples.size())) {
-                        // Copy from pre-rendered cache (very fast memory copy)
                         std::memcpy(out, &cached.samples[start_offset], n * sizeof(int16_t));
-                        // Apply volume scaling
-                        if(mv<1.0f)
+                        if(mv < 1.0f) {
                             for(int i=0;i<n;++i) out[i]=static_cast<int16_t>(static_cast<float>(out[i])*mv);
+                        }
                         used_cached_music = true;
+                        // DEBUG: Uncomment to verify cache usage spam
+                        // if(pos_in_row == 0) std::printf("[IngameFM] Music: Using CACHE (Row %d)\n", current_row_.load());
                     }
                 }
             }
             
             if(!used_cached_music) {
-                // Fallback to real-time generation if cache miss, disabled, or bounds error
-                ym_music_->generate(out, to_generate);
-                if(mv<1.0f)
-                    for(int i=0;i<n;++i) out[i]=static_cast<int16_t>(out[i]*mv);
+                if(ym_music_) {
+                    ym_music_->generate(out, to_generate);
+                    if(mv < 1.0f) {
+                        for(int i=0;i<n;++i) out[i]=static_cast<int16_t>(out[i]*mv);
+                    }
+                    // DEBUG:
+                    // if(pos_in_row == 0) std::printf("[IngameFM] Music: Using REAL-TIME\n");
+                } else {
+                    std::memset(out, 0, n * sizeof(int16_t));
+                }
             }
 
-//             // ── Generate and mix SFX ─────────────────────────────────────────
-//             const float sv=sfx_vol_.load();
-//             bool any_sfx=false;
-//             for(int v=0;v<sfx_voices_;++v) if(sfx_voice_[v].active()){any_sfx=true;break;}
-
-//             if(any_sfx && sv>0.0f) {
-//                 // Mix each active SFX voice from cache for maximum performance
-//                 for(int i=0;i<n;++i) {
-//                     float mixed = static_cast<float>(out[i]);
-//                     bool sfx_sample_found = false;
-                    
-//                     for(int v=0;v<sfx_voices_;++v) {
-//                         if(!sfx_voice_[v].active()) continue;
+            // --- SFX PATH ---
+            const float sv = sfx_vol_.load();
+            bool any_sfx = false;
+            for(int v=0; v<sfx_voices_; ++v) if(sfx_voice_[v].active()){any_sfx=true;break;}
+            
+            if(any_sfx && sv > 0.0f) {
+                if(use_cache_) {
+                    // === CACHED SFX PATH ===
+                    // We mix each active voice from its respective cache
+                    for(int i=0; i<n; ++i) {
+                        float mixed = static_cast<float>(out[i]);
+                        bool sfx_contributed = false;
                         
-//                         // Try to use cached SFX audio using pointer address as key
-//                         const SfxVoiceState& vs = sfx_voice_[v];
-//                         if(use_cache_ && vs.cache_key) {
-//                             auto it = sfx_cache_.find(vs.cache_key);
-//                             if(it != sfx_cache_.end() && it->second.valid) {
-//                                 const CachedSfx& cached = it->second;
-//                                 int sfx_offset = (vs.current_row * cached.samples_per_row + vs.sample_in_row) * 2;
-//                                 // Calculate absolute offset for this specific sample in the stream chunk
-//                                 int absolute_sfx_sample = sfx_offset + i;
-//                                 if(absolute_sfx_sample >= 0 && absolute_sfx_sample < static_cast<int>(cached.samples.size())) {
-//                                     mixed += static_cast<float>(cached.samples[absolute_sfx_sample]) * sv;
-//                                     sfx_sample_found = true;
-//                                     // Note: We sum all active voices. If multiple are active, they all contribute.
-//                                     // The 'continue' here only skips the fallback for THIS voice if found.
-//                                     // Actually, the logic above sums them. If cache hit, we add. If not, we skip adding for this voice.
-//                                     // To be safe and simple: if cache hit, add. If not, don't add (silence for that voice for this sample).
-//                                     // A more robust fallback would generate real-time, but for speed we assume cache hits.
-//                                     continue; 
-//                                 }
-//                             }
-//                         }
-//                         // If cache miss or disabled, we simply don't add this voice's contribution for this sample
-//                         // to maintain the "fast path" assumption. In a production system, you might want
-//                         // a hybrid approach or ensure 100% cache coverage.
-//                     }
-//                     out[i]=static_cast<int16_t>(std::max(-32768.f,std::min(32767.f,mixed)));
-//                 }
-//             } else {
-//                 // No SFX active or muted: still need to advance chip state to prevent drift if we were using real-time
-//                 // But since we are cached, the chip state doesn't matter for output, only for correctness if we switch modes.
-//                 // To be safe and consistent with original logic, we advance the dummy chip if not using cache for SFX
-//                 // However, if we are fully cached, we don't strictly need to run the chip. 
-//                 // Let's keep the original behavior of advancing the chip to maintain state consistency.
-//                 int16_t dummy[512*2];
-//                 ym_sfx_->generate(dummy, to_generate);
-//             }
-// // ── Generate and mix SFX ─────────────────────────────────────────
-const float sv = sfx_vol_.load();
-bool any_sfx = false;
-for(int v=0; v<sfx_voices_; ++v) if(sfx_voice_[v].active()) { any_sfx=true; break; }
+                        for(int v=0; v<sfx_voices_; ++v) {
+                            if(!sfx_voice_[v].active()) continue;
+                            const SfxVoiceState& vs = sfx_voice_[v];
+                            
+                            if(vs.cache_key_id >= 0) {
+                                auto it = sfx_cache_.find(vs.cache_key_id);
+                                
+                                // On-demand cache generation for SFX too
+                                if(it == sfx_cache_.end() && sfx_defs_present_[vs.sfx_id]) {
+                                    const SfxDef& def = sfx_defs_[vs.sfx_id];
+                                    std::printf("[IngameFM] Cache Miss (SFX ID %d): Generating on-demand...\n", vs.cache_key_id);
+                                    sfx_cache_[vs.cache_key_id] = prerender_sfx(def.song, def.tick_rate, def.speed, patches_, patches_present_);
+                                    it = sfx_cache_.find(vs.cache_key_id);
+                                }
 
-if(any_sfx && sv>0.0f) {
-    if(use_cache_) {
-        // --- CACHED PATH (Existing logic) ---
-        for(int i=0; i<n; ++i) {
-            float mixed = static_cast<float>(out[i]);
-            for(int v=0; v<sfx_voices_; ++v) {
-                if(!sfx_voice_[v].active()) continue;
-                const SfxVoiceState& vs = sfx_voice_[v];
-                if(vs.cache_key) {
-                    auto it = sfx_cache_.find(vs.cache_key);
-                    if(it != sfx_cache_.end() && it->second.valid) {
-                        const CachedSfx& cached = it->second;
-                        int sfx_offset = (vs.current_row * cached.samples_per_row + vs.sample_in_row) * 2;
-                        int absolute_sfx_sample = sfx_offset + i;
-                        if(absolute_sfx_sample >= 0 && absolute_sfx_sample < static_cast<int>(cached.samples.size())) {
-                            mixed += static_cast<float>(cached.samples[absolute_sfx_sample]) * sv;
+                                if(it != sfx_cache_.end() && it->second.valid) {
+                                    const CachedSfx& cached = it->second;
+                                    // Calculate absolute sample index carefully
+                                    int sfx_offset = (vs.current_row * cached.samples_per_row + vs.sample_in_row) * 2;
+                                    int absolute_sfx_sample = sfx_offset + i;
+                                    
+                                    if(absolute_sfx_sample >= 0 && absolute_sfx_sample < static_cast<int>(cached.samples.size())) {
+                                        mixed += static_cast<float>(cached.samples[absolute_sfx_sample]) * sv;
+                                        sfx_contributed = true;
+                                    }
+                                }
+                            }
+                        }
+                        out[i] = static_cast<int16_t>(std::max(-32768.f, std::min(32767.f, mixed)));
+                    }
+                } else {
+                    // === REAL-TIME SFX PATH ===
+                    // Generate all active SFX voices together via ym_sfx_ chip
+                    // Note: ym_sfx_ holds the state of the *last* processed voice or a mix? 
+                    // Actually, your current architecture uses ONE chip for ALL SFX voices multiplexed?
+                    // WAIT: Your sfx_process_row/sfx_commit_keyon writes to channel 'v' on ym_sfx_.
+                    // So ym_sfx_ has 6 channels active simultaneously.
+                    
+                    if(ym_sfx_) {
+                        int16_t sfx_out[2048]; // Safety buffer
+                        if(to_generate * 2 > 2048) { 
+                             // Fallback if chunk is huge (unlikely with 512 sample blocks)
+                             std::vector<int16_t> dynamic_buf(to_generate * 2);
+                             ym_sfx_->generate(dynamic_buf.data(), to_generate);
+                             for(int i=0; i<n; ++i) {
+                                 float mixed = static_cast<float>(out[i]) + static_cast<float>(dynamic_buf[i]) * sv;
+                                 out[i] = static_cast<int16_t>(std::max(-32768.f, std::min(32767.f, mixed)));
+                             }
+                        } else {
+                            ym_sfx_->generate(sfx_out, to_generate);
+                            for(int i=0; i<n; ++i) {
+                                float mixed = static_cast<float>(out[i]) + static_cast<float>(sfx_out[i]) * sv;
+                                out[i] = static_cast<int16_t>(std::max(-32768.f, std::min(32767.f, mixed)));
+                            }
                         }
                     }
                 }
+            } else {
+                // No active SFX, but we must advance the chip state if not caching
+                // If caching, the chip state doesn't matter for output, but sfx_tick_voice still runs later.
+                // To be safe and consistent, we only burn cycles if NOT caching.
+                if(!use_cache_ && ym_sfx_) {
+                    int16_t dummy[2048];
+                    if(to_generate * 2 <= 2048) {
+                        ym_sfx_->generate(dummy, to_generate);
+                    }
+                }
             }
-            out[i] = static_cast<int16_t>(std::max(-32768.f, std::min(32767.f, mixed)));
-        }
-    } else {
-        // --- REAL-TIME PATH (FIX ADDED) ---
-        // We must generate into a temp buffer and mix, otherwise envelopes don't advance
-        int16_t sfx_buffer[1024]; // Ensure this is large enough for 'to_generate' * 2
-        // Note: to_generate is samples (frames), buffer needs samples * 2 (stereo)
-        // The generate function signature expects int16_t* stream and int samples (frames)
-        // But out is interleaved stereo. ym_sfx_->generate likely expects stereo buffer if chip is stereo.
-        // Based on music generation: ym_music_->generate(out, to_generate); where out is int16_t* (stereo interleaved)
-        
-        // Reuse 'out' logic but mix carefully. 
-        // To avoid alloc, we can generate into a stack buffer if to_generate is small, 
-        // but 'to_generate' varies. Let's assume max buffer size or dynamic. 
-        // For safety in header-only, let's use a vector or ensure stack size is sufficient.
-        // Given 'samples' passed to callback is usually 512, to_generate <= 512.
-        // 512 * 2 channels = 1024 int16_t.
-        
-        // Safe stack buffer for max typical block (adjust if your buffer size > 512 frames)
-        int16_t sfx_frame_buffer[2048]; 
-        
-        ym_sfx_->generate(sfx_frame_buffer, to_generate);
-        
-        for(int i=0; i<n; ++i) {
-            float music = static_cast<float>(out[i]);
-            float sfx   = static_cast<float>(sfx_frame_buffer[i]);
-            out[i] = static_cast<int16_t>(std::max(-32768.f, std::min(32767.f, music + (sfx * sv))));
-        }
-    }
-} else {
-    // No SFX active or muted: advance chip state to prevent drift
-    int16_t dummy[2048];
-    ym_sfx_->generate(dummy, to_generate);
-}
-            // ── Tick SFX voices ───────────────────────────────────────────────
-            for(int v=0;v<sfx_voices_;++v) sfx_tick_voice(v,to_generate);
 
-            out+=to_generate*2; remaining-=to_generate; sample_in_row_+=to_generate;
-
-            if(in_gap&&sample_in_row_>=KEY_OFF_GAP_SAMPLES) commit_keyon();
-
-            if(sample_in_row_>=samples_per_row_) {
-                sample_in_row_=0;
-                int row=current_row_.load()+1;
-                if(row>=(int)song_.rows.size()) {
-                    // Pattern end — apply queued AT_PATTERN_END song change if any
-                    if(pending_song_.pending &&
-                       pending_song_.when==SongChangeWhen::AT_PATTERN_END) {
+            // --- ADVANCE STATE ---
+            // This MUST run regardless of cache mode to keep row/sample counters correct
+            for(int v=0; v<sfx_voices_; ++v) sfx_tick_voice(v, to_generate);
+            
+            out += to_generate*2; 
+            remaining -= to_generate; 
+            sample_in_row_ += to_generate;
+            
+            if(in_gap && sample_in_row_ >= KEY_OFF_GAP_SAMPLES) commit_keyon();
+            
+            if(sample_in_row_ >= samples_per_row_) {
+                sample_in_row_ = 0;
+                int row = current_row_.load() + 1;
+                if(row >= (int)song_.rows.size()) {
+                    if(pending_song_.pending && pending_song_.when == SongChangeWhen::AT_PATTERN_END) {
                         apply_pending_song();
-                        // apply_pending_song already called process_row + commit_keyon
-                        // and set sample_in_row_ = KEY_OFF_GAP_SAMPLES, so skip below
                         break;
                     }
                     if(loop_) { for(auto& p:pending_) p={}; row=0; }
                     else {
-                        std::memset(out,0,remaining*4);
-                        for(int ch=0;ch<MAX_CHANNELS;ch++) ym_music_->key_off(ch);
-                        finished_.store(true); return;
+                        std::memset(out, 0, remaining*4);
+                        if(ym_music_) for(int ch=0; ch<MAX_CHANNELS; ch++) ym_music_->key_off(ch);
+                        finished_.store(true); 
+                        return;
                     }
                 }
                 current_row_.store(row);
