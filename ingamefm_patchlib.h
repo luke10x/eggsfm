@@ -64,7 +64,8 @@ public:
     static constexpr uint32_t YM_CLOCK = 7670453;
 
     IngameFMYMInterface intf;
-    ymfm::ym2612       chip;
+    // ymfm::ym2612       chip;
+    ymfm::ym3438       chip;
 
     IngameFMChip() : chip(intf) { chip.reset(); }
 

@@ -1,8 +1,7 @@
 #pragma once
 #include <sstream>
 // =============================================================================
-// ingamefm_player.h — Updated to use Integer IDs for Cache Keys
-// Fixes Crash: Ensures chips are initialized before song_select processes rows
+// ingamefm_player.h — Configurable Sample Rate Version
 // =============================================================================
 #include "ingamefm_patchlib.h"
 #include <SDL.h>
@@ -17,6 +16,7 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <memory>
 
 static constexpr int NOTE_NONE = -1;
 static constexpr int NOTE_OFF  = -2;
@@ -25,7 +25,7 @@ struct IngameFMEvent  { int note; int instrument; int volume; };
 struct IngameFMRow    { std::vector<IngameFMEvent> channels; };
 struct IngameFMSong   { int num_rows=0; int num_channels=0; std::vector<IngameFMRow> rows; };
 
-// --- Helper Functions (Same as before) ---
+// --- Helper Functions (Unchanged) ---
 static std::string trim_right(const std::string& s) {
     size_t end = s.find_last_not_of(" \t\r\n");
     return (end == std::string::npos) ? "" : s.substr(0, end + 1);
@@ -125,7 +125,7 @@ struct SfxVoiceState {
     bool pending_has_note=false; bool pending_is_off=false;
     int  pending_note=0; int pending_inst=0; int pending_vol=0x7F;
     int  last_instrument=0; int last_volume=0x7F;
-    int  cache_key_id = -1; // CHANGED: Store ID instead of pointer
+    int  cache_key_id = -1;
     bool active() const { return sfx_id>=0 && ticks_remaining>0; }
 };
 
@@ -134,177 +134,20 @@ enum class SongChangeWhen { NOW, AT_PATTERN_END };
 class IngameFMPlayer
 {
 public:
-    // =======================================================================
-    // CACHE DUMP/LOAD (For xxd embedding workflow)
-    // =======================================================================
-
-    // --- Dump Pre-rendered Cache to Binary File ---
-    void song_dump(int id, const std::string& filename) {
-        if(!use_cache_) {
-            std::fprintf(stderr, "[IngameFM] Warning: song_dump called but use_cache_ is false. Nothing to dump.\n");
-            return;
-        }
-        auto it = song_cache_.find(id);
-        if(it == song_cache_.end() || !it->second.valid) {
-            std::fprintf(stderr, "[IngameFM] Error: No cached data found for Song ID %d. Define song first.\n", id);
-            return;
-        }
-        _write_cache_file(filename, it->second.samples, it->second.samples_per_row, it->second.total_rows, 'M'); // 'M' for Music
-    }
-
-    void sfx_dump(int id, const std::string& filename) {
-        if(!use_cache_) {
-            std::fprintf(stderr, "[IngameFM] Warning: sfx_dump called but use_cache_ is false. Nothing to dump.\n");
-            return;
-        }
-        auto it = sfx_cache_.find(id);
-        if(it == sfx_cache_.end() || !it->second.valid) {
-            std::fprintf(stderr, "[IngameFM] Error: No cached data found for SFX ID %d. Define SFX first.\n", id);
-            return;
-        }
-        _write_cache_file(filename, it->second.samples, it->second.samples_per_row, it->second.total_rows, 'S'); // 'S' for SFX
-    }
-
-    // --- Load Pre-rendered Cache from Memory (xxd array) ---
-    // void song_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
-    //     CachedSong cached = _parse_cache_data<CachedSong>(data, len, 'M');
-    //     if(cached.valid) {
-    //         cached.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
-    //         // Recalculate total_rows based on loaded samples to be safe
-    //         if(cached.samples_per_row > 0) {
-    //             cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
-    //         }
-    //         song_cache_[id] = cached;
-            
-    //         // Also register the definition so song_select works logically
-    //         DefinedSong def;
-    //         def.tick_rate = tick_rate;
-    //         def.speed = speed;
-    //         def.samples_per_row = cached.samples_per_row;
-    //         def.cache_key_id = id;
-    //         def.valid = true; 
-    //         // We leave def.song empty/minimal since we rely on cache, 
-    //         // but song_select might check rows.size(). 
-    //         // Let's create a dummy song structure matching the cache dimensions.
-    //         def.song.num_rows = cached.total_rows;
-    //         def.song.num_channels = 0; 
-    //         defined_songs_[id] = std::move(def);
-            
-    //         std::printf("[IngameFM] Loaded Song ID %d from xxd (%d rows, %d samples).\n", id, cached.total_rows, (int)cached.samples.size());
-    //     } else {
-    //         std::fprintf(stderr, "[IngameFM] Failed to parse Song ID %d from xxd data.\n", id);
-    //     }
-    // }
-
-    // void sfx_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
-    //     CachedSfx cached = _parse_cache_data<CachedSfx>(data, len, 'S');
-    //     if(cached.valid) {
-    //         cached.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
-    //         if(cached.samples_per_row > 0) {
-    //             cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
-    //         }
-    //         sfx_cache_[id] = cached;
-
-    //         // Register definition
-    //         SfxDef def;
-    //         def.tick_rate = tick_rate;
-    //         def.speed = speed;
-    //         def.samples_per_row = cached.samples_per_row;
-    //         def.cache_key_id = id;
-    //         def.song.num_rows = cached.total_rows;
-    //         def.song.num_channels = 1; // SFX usually 1 channel
-            
-    //         sfx_defs_[id] = std::move(def);
-    //         sfx_defs_present_[id] = true;
-
-    //         std::printf("[IngameFM] Loaded SFX ID %d from xxd (%d rows, %d samples).\n", id, cached.total_rows, (int)cached.samples.size());
-    //     } else {
-    //         std::fprintf(stderr, "[IngameFM] Failed to parse SFX ID %d from xxd data.\n", id);
-    //     }
-    // }
-        // --- Load Pre-rendered Cache from Memory (xxd array) ---
-    void song_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
-        CachedSong cached = _parse_cache_data<CachedSong>(data, len, 'M');
-        if(cached.valid) {
-            cached.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
-            if(cached.samples_per_row > 0) {
-                cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
-            }
-            song_cache_[id] = cached;
-            
-            // Register definition
-            DefinedSong def;
-            def.tick_rate = tick_rate;
-            def.speed = speed;
-            def.samples_per_row = cached.samples_per_row;
-            def.cache_key_id = id;
-            def.valid = true; 
-            
-            // FIX: Create a dummy song structure that won't crash process_row
-            def.song.num_rows = cached.total_rows;
-            def.song.num_channels = MAX_CHANNELS; // Set to max to be safe
-            
-            // IMPORTANT: Resize the rows vector so accessing [0] doesn't crash
-            // We don't need real events because audio comes from cache, 
-            // but the code expects the vector to exist.
-            def.song.rows.resize(cached.total_rows);
-            for(auto& row : def.song.rows) {
-                row.channels.resize(MAX_CHANNELS);
-                // Fill with NOTE_NONE so if real-time fallback happens, it's silent/safe
-                for(auto& ev : row.channels) {
-                    ev.note = NOTE_NONE;
-                    ev.instrument = -1;
-                    ev.volume = -1;
-                }
-            }
-
-            defined_songs_[id] = std::move(def);
-            
-            std::printf("[IngameFM] Loaded Song ID %d from xxd (%d rows, %d samples).\n", id, cached.total_rows, (int)cached.samples.size());
-        } else {
-            std::fprintf(stderr, "[IngameFM] Failed to parse Song ID %d from xxd data.\n", id);
-        }
-    }
-
-    void sfx_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
-        CachedSfx cached = _parse_cache_data<CachedSfx>(data, len, 'S');
-        if(cached.valid) {
-            cached.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
-            if(cached.samples_per_row > 0) {
-                cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
-            }
-            sfx_cache_[id] = cached;
-
-            // Register definition
-            SfxDef def;
-            def.tick_rate = tick_rate;
-            def.speed = speed;
-            def.samples_per_row = cached.samples_per_row;
-            def.cache_key_id = id;
-            
-            // FIX: Same here, ensure rows vector exists
-            def.song.num_rows = cached.total_rows;
-            def.song.num_channels = 1; 
-            def.song.rows.resize(cached.total_rows);
-            for(auto& row : def.song.rows) {
-                row.channels.resize(1);
-                row.channels[0].note = NOTE_NONE;
-                row.channels[0].instrument = -1;
-                row.channels[0].volume = -1;
-            }
-            
-            sfx_defs_[id] = std::move(def);
-            sfx_defs_present_[id] = true;
-
-            std::printf("[IngameFM] Loaded SFX ID %d from xxd (%d rows, %d samples).\n", id, cached.total_rows, (int)cached.samples.size());
-        } else {
-            std::fprintf(stderr, "[IngameFM] Failed to parse SFX ID %d from xxd data.\n", id);
-        }
-    }
-
     static constexpr int MAX_CHANNELS   = 6;
     static constexpr int MAX_SFX_VOICES = 6;
-    static constexpr int SAMPLE_RATE    = 44100;
+    // SAMPLE_RATE is no longer hardcoded here. It is now an instance variable.
+
+    // --- CONFIGURATION ---
+    
+    // Set the sample rate BEFORE defining songs or loading xxd data.
+    // Default is 44100. Common values: 22050, 44100, 48000.
+    void set_sample_rate(int rate) {
+        if(rate <= 0) throw std::runtime_error("Sample rate must be > 0");
+        sample_rate_ = rate;
+    }
+
+    int get_sample_rate() const { return sample_rate_; }
 
     void set_music_volume(float v) { music_vol_.store(std::max(0.f,std::min(1.f,v))); }
     void set_sfx_volume  (float v) { sfx_vol_  .store(std::max(0.f,std::min(1.f,v))); }
@@ -324,14 +167,14 @@ public:
         def.song = parse_ingamefm_song(text);
         def.tick_rate = tick_rate;
         def.speed = speed;
-        def.samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
+        // UPDATED: Uses instance variable sample_rate_
+        def.samples_per_row = static_cast<int>(static_cast<double>(sample_rate_)/tick_rate*speed);
         def.valid = true;
-        def.cache_key_id = id; // CHANGED: Use ID as cache key
+        def.cache_key_id = id;
 
         if(use_cache_) {
-            // Check if already cached by ID
             if(song_cache_.find(id) == song_cache_.end()) {
-                song_cache_[id] = prerender_song(def.song, tick_rate, speed, patches_, patches_present_);
+                song_cache_[id] = prerender_song(def.song, tick_rate, speed, patches_, patches_present_, sample_rate_);
             }
         }
         defined_songs_[id] = std::move(def);
@@ -345,27 +188,22 @@ public:
         }
         const DefinedSong& def = it->second;
 
-        // FIX: Ensure chips are initialized BEFORE calling process_row/key_off
-        // If start() hasn't been called yet, ym_music_ is null. We must create it now.
         if(!ym_music_) {
             ym_music_ = std::make_unique<IngameFMChip>();
             ym_sfx_   = std::make_unique<IngameFMChip>();
-            // Enable L+R output
             for(int c=0;c<3;++c) {
                 ym_music_->write(0,0xB4+c,0xC0); ym_music_->write(1,0xB4+c,0xC0);
                 ym_sfx_  ->write(0,0xB4+c,0xC0); ym_sfx_  ->write(1,0xB4+c,0xC0);
             }
         }
 
-        // Stop current music cleanly
         for(int ch=0; ch<MAX_CHANNELS; ch++) ym_music_->key_off(ch);
 
-        // Update state
         song_ = def.song;
         tick_rate_ = def.tick_rate;
         speed_ = def.speed;
         samples_per_row_ = def.samples_per_row;
-        current_song_cache_key_id_ = def.cache_key_id; // CHANGED
+        current_song_cache_key_id_ = def.cache_key_id;
         current_song_id_ = id;
 
         loop_ = loop;
@@ -377,7 +215,6 @@ public:
         for(auto& c : ch_state_) c = IngameFMChannelState{};
         for(auto& p : pending_)  p = {};
 
-        // Now safe to call process_row since ym_music_ exists
         process_row(0);
         commit_keyon();
         sample_in_row_ = KEY_OFF_GAP_SAMPLES;
@@ -399,7 +236,7 @@ public:
         ps.start_row       = std::max(0, std::min(start_row, static_cast<int>(ps.song.rows.size())-1));
         ps.when            = when;
         ps.pending         = true;
-        ps.cache_key_id    = def.cache_key_id; // CHANGED
+        ps.cache_key_id    = def.cache_key_id;
 
         pending_song_ = std::move(ps);
     }
@@ -420,12 +257,13 @@ public:
         def.song=parse_ingamefm_song(pattern); 
         def.tick_rate=tick_rate; 
         def.speed=speed;
-        def.samples_per_row=static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
-        def.cache_key_id = id; // CHANGED
+        // UPDATED: Uses instance variable sample_rate_
+        def.samples_per_row=static_cast<int>(static_cast<double>(sample_rate_)/tick_rate*speed);
+        def.cache_key_id = id;
         
         if(use_cache_) {
             if(sfx_cache_.find(id) == sfx_cache_.end()) {
-                sfx_cache_[id] = prerender_sfx(def.song, tick_rate, speed, patches_, patches_present_);
+                sfx_cache_[id] = prerender_sfx(def.song, tick_rate, speed, patches_, patches_present_, sample_rate_);
             }
         }
         sfx_defs_[id]=std::move(def);
@@ -435,7 +273,10 @@ public:
     void play(bool loop=false) {
         if(song_.rows.empty()) throw std::runtime_error("No song loaded");
         reset_state(loop);
-        SDL_AudioSpec desired{}; desired.freq=SAMPLE_RATE; desired.format=AUDIO_S16SYS;
+        SDL_AudioSpec desired{}; 
+        // UPDATED: Uses instance variable sample_rate_ for SDL
+        desired.freq=sample_rate_; 
+        desired.format=AUDIO_S16SYS;
         desired.channels=2; desired.samples=512; desired.callback=s_audio_callback; desired.userdata=this;
         SDL_AudioSpec obtained{};
         SDL_AudioDeviceID dev=SDL_OpenAudioDevice(nullptr,0,&desired,&obtained,0);
@@ -446,8 +287,6 @@ public:
     }
 
     void start(SDL_AudioDeviceID dev, bool loop=false) {
-        // Note: song_select should have been called before this, which initializes chips.
-        // But if user calls start without select, we init here to be safe.
         if(!ym_music_) {
              ym_music_ = std::make_unique<IngameFMChip>();
              ym_sfx_   = std::make_unique<IngameFMChip>();
@@ -459,12 +298,10 @@ public:
         
         if(song_.rows.empty()) throw std::runtime_error("No song loaded");
         SDL_LockAudioDevice(dev); 
-        // Only reset counters/timers, don't recreate chips if they exist
         loop_=loop; current_row_.store(0); sample_in_row_=0; finished_.store(false); pending_song_.pending=false;
         for(auto& c:ch_state_) c=IngameFMChannelState{};
         for(auto& p:pending_)  p={};
         for(auto& v:sfx_voice_) v=SfxVoiceState{};
-        // Re-init registers just in case
         for(int c=0;c<3;++c) {
             ym_music_->write(0,0xB4+c,0xC0); ym_music_->write(1,0xB4+c,0xC0);
             ym_sfx_  ->write(0,0xB4+c,0xC0); ym_sfx_  ->write(1,0xB4+c,0xC0);
@@ -515,7 +352,7 @@ public:
         vs.pending_is_off  = false;
         vs.last_instrument = 0;
         vs.last_volume     = 0x7F;
-        vs.cache_key_id    = def.cache_key_id; // CHANGED
+        vs.cache_key_id    = def.cache_key_id;
 
         sfx_process_row(best_v, 0, true);
         sfx_commit_keyon(best_v);
@@ -529,13 +366,116 @@ public:
 
     bool use_cache_ = false;
 
+    // =======================================================================
+    // CACHE DUMP/LOAD (For xxd embedding workflow)
+    // =======================================================================
+
+    void song_dump(int id, const std::string& filename) {
+        if(!use_cache_) {
+            std::fprintf(stderr, "[IngameFM] Warning: song_dump called but use_cache_ is false.\n");
+            return;
+        }
+        auto it = song_cache_.find(id);
+        if(it == song_cache_.end() || !it->second.valid) {
+            std::fprintf(stderr, "[IngameFM] Error: No cached data found for Song ID %d.\n", id);
+            return;
+        }
+        _write_cache_file(filename, it->second.samples, it->second.samples_per_row, it->second.total_rows, 'M');
+    }
+
+    void sfx_dump(int id, const std::string& filename) {
+        if(!use_cache_) {
+            std::fprintf(stderr, "[IngameFM] Warning: sfx_dump called but use_cache_ is false.\n");
+            return;
+        }
+        auto it = sfx_cache_.find(id);
+        if(it == sfx_cache_.end() || !it->second.valid) {
+            std::fprintf(stderr, "[IngameFM] Error: No cached data found for SFX ID %d.\n", id);
+            return;
+        }
+        _write_cache_file(filename, it->second.samples, it->second.samples_per_row, it->second.total_rows, 'S');
+    }
+
+    // UPDATED: xxd loaders now rely on the internal sample_rate_ for calculations if needed,
+    // but primarily they trust the data in the file. The tick_rate/speed args are kept 
+    // to reconstruct the 'Definition' metadata correctly.
+    void song_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
+        CachedSong cached = _parse_cache_data<CachedSong>(data, len, 'M');
+        if(cached.valid) {
+            // Recalculate based on current instance sample_rate_
+            cached.samples_per_row = static_cast<int>(static_cast<double>(sample_rate_)/tick_rate*speed);
+            if(cached.samples_per_row > 0) {
+                cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
+            }
+            song_cache_[id] = cached;
+            
+            DefinedSong def;
+            def.tick_rate = tick_rate;
+            def.speed = speed;
+            def.samples_per_row = cached.samples_per_row;
+            def.cache_key_id = id;
+            def.valid = true; 
+            
+            def.song.num_rows = cached.total_rows;
+            def.song.num_channels = MAX_CHANNELS;
+            // FIX: Create dummy rows to prevent crash in process_row
+            def.song.rows.resize(cached.total_rows);
+            for(auto& row : def.song.rows) {
+                row.channels.resize(MAX_CHANNELS);
+                for(auto& ev : row.channels) {
+                    ev.note = NOTE_NONE; ev.instrument = -1; ev.volume = -1;
+                }
+            }
+
+            defined_songs_[id] = std::move(def);
+            std::printf("[IngameFM] Loaded Song ID %d from xxd (%d rows, %d samples, SR=%d).\n", 
+                        id, cached.total_rows, (int)cached.samples.size(), sample_rate_);
+        } else {
+            std::fprintf(stderr, "[IngameFM] Failed to parse Song ID %d from xxd data.\n", id);
+        }
+    }
+
+    void sfx_from_xxd(int id, const uint8_t* data, size_t len, int tick_rate, int speed) {
+        CachedSfx cached = _parse_cache_data<CachedSfx>(data, len, 'S');
+        if(cached.valid) {
+            cached.samples_per_row = static_cast<int>(static_cast<double>(sample_rate_)/tick_rate*speed);
+            if(cached.samples_per_row > 0) {
+                cached.total_rows = static_cast<int>(cached.samples.size() / 2 / cached.samples_per_row);
+            }
+            sfx_cache_[id] = cached;
+
+            SfxDef def;
+            def.tick_rate = tick_rate;
+            def.speed = speed;
+            def.samples_per_row = cached.samples_per_row;
+            def.cache_key_id = id;
+            
+            def.song.num_rows = cached.total_rows;
+            def.song.num_channels = 1;
+            // FIX: Create dummy rows
+            def.song.rows.resize(cached.total_rows);
+            for(auto& row : def.song.rows) {
+                row.channels.resize(1);
+                row.channels[0].note = NOTE_NONE; row.channels[0].instrument = -1; row.channels[0].volume = -1;
+            }
+            
+            sfx_defs_[id] = std::move(def);
+            sfx_defs_present_[id] = true;
+
+            std::printf("[IngameFM] Loaded SFX ID %d from xxd (%d rows, %d samples, SR=%d).\n", 
+                        id, cached.total_rows, (int)cached.samples.size(), sample_rate_);
+        } else {
+            std::fprintf(stderr, "[IngameFM] Failed to parse SFX ID %d from xxd data.\n", id);
+        }
+    }
+
 private:
     struct DefinedSong {
         IngameFMSong song;
         int tick_rate = 60;
         int speed = 6;
         int samples_per_row = 0;
-        int cache_key_id = -1; // CHANGED
+        int cache_key_id = -1;
         bool valid = false;
     };
     std::unordered_map<int, DefinedSong> defined_songs_;
@@ -546,7 +486,7 @@ private:
         int tick_rate=60;
         int speed=6;
         int samples_per_row=0;
-        int cache_key_id = -1; // CHANGED
+        int cache_key_id = -1;
     };
     std::array<SfxDef, 256>         sfx_defs_{};
     std::array<bool,   256>         sfx_defs_present_{};
@@ -574,7 +514,7 @@ private:
         int            start_row       = 0;
         SongChangeWhen when            = SongChangeWhen::AT_PATTERN_END;
         bool           pending         = false;
-        int            cache_key_id    = -1; // CHANGED
+        int            cache_key_id    = -1;
     };
     PendingSong pending_song_{};
 
@@ -583,6 +523,9 @@ private:
     std::atomic<float> music_vol_{1.0f};
     std::atomic<float> sfx_vol_  {1.0f};
     static constexpr int KEY_OFF_GAP_SAMPLES = 44;
+
+    // NEW: Configurable Sample Rate
+    int sample_rate_ = 44100; 
 
     struct CachedSong {
         std::vector<int16_t> samples; 
@@ -596,13 +539,11 @@ private:
         int total_rows = 0;
         bool valid = false;
     };
-    // CHANGED: Map uses int ID as key
     std::unordered_map<int, CachedSong> song_cache_;
     std::unordered_map<int, CachedSfx> sfx_cache_;
     int current_song_cache_key_id_ = -1;
 
     void reset_state(bool loop) {
-        // Only create chips if they don't exist
         if(!ym_music_) {
             ym_music_=std::make_unique<IngameFMChip>();
             ym_sfx_  =std::make_unique<IngameFMChip>();
@@ -625,10 +566,12 @@ private:
 
     static CachedSong prerender_song(const IngameFMSong& song, int tick_rate, int speed,
                                      const std::array<YM2612Patch,256>& patches,
-                                     const std::array<bool,256>& patches_present) {
+                                     const std::array<bool,256>& patches_present,
+                                     int sample_rate) { // Added arg
         CachedSong result;
         if(song.rows.empty()) return result;
-        int samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
+        // UPDATED: Uses passed sample_rate
+        int samples_per_row = static_cast<int>(static_cast<double>(sample_rate)/tick_rate*speed);
         int total_samples = song.num_rows * samples_per_row;
         result.samples.resize(total_samples * 2); 
         result.samples_per_row = samples_per_row;
@@ -641,15 +584,10 @@ private:
         std::array<PendingNote, MAX_CHANNELS> pending{};
 
         for(int rowIdx=0; rowIdx<song.num_rows; ++rowIdx) {
-            // Progress Logging (Every 10%)
             int total = song.num_rows;
             if (total > 0 && (rowIdx % (total / 10 + 1)) == 0) { 
-                // The (total / 10 + 1) ensures we hit 0%, 10%, 20%... even if rows aren't perfectly divisible by 10
                 int percent = (rowIdx * 100) / total;
-                // Only log if it's a clean 10% mark (0, 10, 20...) to avoid spam on small songs
-                if (percent % 10 == 0) {
-                    std::printf("[IngameFM] Pre-rendering: %d%% complete (%d/%d rows)\n", percent, rowIdx, total);
-                }
+                if (percent % 10 == 0) std::printf("[IngameFM] Pre-rendering: %d%% complete\n", percent);
             }
             const IngameFMRow& row = song.rows[rowIdx];
             int numCh = std::min((int)row.channels.size(), MAX_CHANNELS);
@@ -692,10 +630,12 @@ private:
 
     static CachedSfx prerender_sfx(const IngameFMSong& song, int tick_rate, int speed,
                                    const std::array<YM2612Patch,256>& patches,
-                                   const std::array<bool,256>& patches_present) {
+                                   const std::array<bool,256>& patches_present,
+                                   int sample_rate) { // Added arg
         CachedSfx result;
         if(song.rows.empty()) return result;
-        int samples_per_row = static_cast<int>(static_cast<double>(SAMPLE_RATE)/tick_rate*speed);
+        // UPDATED: Uses passed sample_rate
+        int samples_per_row = static_cast<int>(static_cast<double>(sample_rate)/tick_rate*speed);
         int total_samples = song.num_rows * samples_per_row;
         result.samples.resize(total_samples * 2); 
         result.samples_per_row = samples_per_row;
@@ -714,15 +654,10 @@ private:
         int pending_vol = 0x7F;
 
         for(int rowIdx=0; rowIdx<song.num_rows; ++rowIdx) {
-            // Progress Logging (Every 10%)
             int total = song.num_rows;
             if (total > 0 && (rowIdx % (total / 10 + 1)) == 0) { 
-                // The (total / 10 + 1) ensures we hit 0%, 10%, 20%... even if rows aren't perfectly divisible by 10
                 int percent = (rowIdx * 100) / total;
-                // Only log if it's a clean 10% mark (0, 10, 20...) to avoid spam on small songs
-                if (percent % 10 == 0) {
-                    std::printf("[IngameFM] Pre-rendering: %d%% complete (%d/%d rows)\n", percent, rowIdx, total);
-                }
+                if (percent % 10 == 0) std::printf("[IngameFM] Pre-rendering SFX: %d%% complete\n", percent);
             }
             const IngameFMRow& row = song.rows[rowIdx];
             if(!row.channels.empty()) {
@@ -789,7 +724,7 @@ private:
         sample_in_row_   = 0;
         finished_.store(false);
         ps.pending       = false;
-        current_song_cache_key_id_ = ps.cache_key_id; // CHANGED
+        current_song_cache_key_id_ = ps.cache_key_id;
         current_song_id_ = -1;
 
         process_row(current_row_.load());
@@ -878,6 +813,7 @@ private:
             }
         }
     }
+
     void audio_callback(int16_t* stream, int samples) {
         if(finished_.load()) { std::memset(stream,0,samples*4); return; }
         
@@ -886,7 +822,6 @@ private:
 
         int remaining=samples;
         int16_t* out=stream;
-        
         while(remaining>0) {
             int pos_in_row=sample_in_row_;
             bool in_gap=pos_in_row<KEY_OFF_GAP_SAMPLES;
@@ -897,15 +832,13 @@ private:
             const int   n = to_generate*2;
             bool used_cached_music = false;
             
-            // --- MUSIC PATH ---
             if(use_cache_ && current_song_cache_key_id_ >= 0) {
-                // Check if cache exists; if not, try to generate it on-demand (safety net)
                 auto it = song_cache_.find(current_song_cache_key_id_);
                 if(it == song_cache_.end() && defined_songs_.count(current_song_cache_key_id_)) {
-                    // Cache miss but definition exists: Populate now!
                     const DefinedSong& def = defined_songs_[current_song_cache_key_id_];
-                    std::printf("[IngameFM] Cache Miss (Music ID %d): Generating on-demand...\n", current_song_cache_key_id_);
-                    song_cache_[current_song_cache_key_id_] = prerender_song(def.song, def.tick_rate, def.speed, patches_, patches_present_);
+                    std::printf("[IngameFM] Cache Miss (Music): Generating on-demand...\n");
+                    // UPDATED: Pass sample_rate_
+                    song_cache_[current_song_cache_key_id_] = prerender_song(def.song, def.tick_rate, def.speed, patches_, patches_present_, sample_rate_);
                     it = song_cache_.find(current_song_cache_key_id_);
                 }
 
@@ -918,8 +851,6 @@ private:
                             for(int i=0;i<n;++i) out[i]=static_cast<int16_t>(static_cast<float>(out[i])*mv);
                         }
                         used_cached_music = true;
-                        // DEBUG: Uncomment to verify cache usage spam
-                        // if(pos_in_row == 0) std::printf("[IngameFM] Music: Using CACHE (Row %d)\n", current_row_.load());
                     }
                 }
             }
@@ -930,50 +861,38 @@ private:
                     if(mv < 1.0f) {
                         for(int i=0;i<n;++i) out[i]=static_cast<int16_t>(out[i]*mv);
                     }
-                    // DEBUG:
-                    // if(pos_in_row == 0) std::printf("[IngameFM] Music: Using REAL-TIME\n");
                 } else {
                     std::memset(out, 0, n * sizeof(int16_t));
                 }
             }
 
-            // --- SFX PATH ---
             const float sv = sfx_vol_.load();
             bool any_sfx = false;
             for(int v=0; v<sfx_voices_; ++v) if(sfx_voice_[v].active()){any_sfx=true;break;}
             
             if(any_sfx && sv > 0.0f) {
                 if(use_cache_) {
-                    // === CACHED SFX PATH ===
-                    // We mix each active voice from its respective cache
                     for(int i=0; i<n; ++i) {
                         float mixed = static_cast<float>(out[i]);
-                        bool sfx_contributed = false;
-                        
                         for(int v=0; v<sfx_voices_; ++v) {
                             if(!sfx_voice_[v].active()) continue;
                             const SfxVoiceState& vs = sfx_voice_[v];
-                            
                             if(vs.cache_key_id >= 0) {
                                 auto it = sfx_cache_.find(vs.cache_key_id);
-                                
-                                // On-demand cache generation for SFX too
                                 if(it == sfx_cache_.end() && sfx_defs_present_[vs.sfx_id]) {
                                     const SfxDef& def = sfx_defs_[vs.sfx_id];
-                                    std::printf("[IngameFM] Cache Miss (SFX ID %d): Generating on-demand...\n", vs.cache_key_id);
-                                    sfx_cache_[vs.cache_key_id] = prerender_sfx(def.song, def.tick_rate, def.speed, patches_, patches_present_);
+                                    std::printf("[IngameFM] Cache Miss (SFX): Generating on-demand...\n");
+                                    // UPDATED: Pass sample_rate_
+                                    sfx_cache_[vs.cache_key_id] = prerender_sfx(def.song, def.tick_rate, def.speed, patches_, patches_present_, sample_rate_);
                                     it = sfx_cache_.find(vs.cache_key_id);
                                 }
 
                                 if(it != sfx_cache_.end() && it->second.valid) {
                                     const CachedSfx& cached = it->second;
-                                    // Calculate absolute sample index carefully
                                     int sfx_offset = (vs.current_row * cached.samples_per_row + vs.sample_in_row) * 2;
                                     int absolute_sfx_sample = sfx_offset + i;
-                                    
                                     if(absolute_sfx_sample >= 0 && absolute_sfx_sample < static_cast<int>(cached.samples.size())) {
                                         mixed += static_cast<float>(cached.samples[absolute_sfx_sample]) * sv;
-                                        sfx_contributed = true;
                                     }
                                 }
                             }
@@ -981,17 +900,9 @@ private:
                         out[i] = static_cast<int16_t>(std::max(-32768.f, std::min(32767.f, mixed)));
                     }
                 } else {
-                    // === REAL-TIME SFX PATH ===
-                    // Generate all active SFX voices together via ym_sfx_ chip
-                    // Note: ym_sfx_ holds the state of the *last* processed voice or a mix? 
-                    // Actually, your current architecture uses ONE chip for ALL SFX voices multiplexed?
-                    // WAIT: Your sfx_process_row/sfx_commit_keyon writes to channel 'v' on ym_sfx_.
-                    // So ym_sfx_ has 6 channels active simultaneously.
-                    
                     if(ym_sfx_) {
-                        int16_t sfx_out[2048]; // Safety buffer
+                        int16_t sfx_out[2048];
                         if(to_generate * 2 > 2048) { 
-                             // Fallback if chunk is huge (unlikely with 512 sample blocks)
                              std::vector<int16_t> dynamic_buf(to_generate * 2);
                              ym_sfx_->generate(dynamic_buf.data(), to_generate);
                              for(int i=0; i<n; ++i) {
@@ -1008,9 +919,6 @@ private:
                     }
                 }
             } else {
-                // No active SFX, but we must advance the chip state if not caching
-                // If caching, the chip state doesn't matter for output, but sfx_tick_voice still runs later.
-                // To be safe and consistent, we only burn cycles if NOT caching.
                 if(!use_cache_ && ym_sfx_) {
                     int16_t dummy[2048];
                     if(to_generate * 2 <= 2048) {
@@ -1019,8 +927,6 @@ private:
                 }
             }
 
-            // --- ADVANCE STATE ---
-            // This MUST run regardless of cache mode to keep row/sample counters correct
             for(int v=0; v<sfx_voices_; ++v) sfx_tick_voice(v, to_generate);
             
             out += to_generate*2; 
@@ -1050,16 +956,13 @@ private:
             }
         }
     }
-    // Helper: Write binary cache to file
+
     void _write_cache_file(const std::string& filename, const std::vector<int16_t>& samples, int spr, int rows, char type) {
         FILE* f = std::fopen(filename.c_str(), "wb");
         if(!f) {
             std::perror(("Failed to open " + filename + " for writing").c_str());
             return;
         }
-
-        // Header: "IFMC" or "IFSC" (IngameFM Cache / SFX Cache)
-        // [4 bytes Magic] [4 bytes SamplesPerRow] [4 bytes TotalRows] [4 bytes SampleCount] [N bytes Data]
         char magic[5] = {0};
         magic[0] = 'I'; magic[1] = 'F'; magic[2] = type; magic[3] = 'C';
 
@@ -1075,18 +978,16 @@ private:
             std::fwrite(samples.data(), sizeof(int16_t), samples.size(), f);
         }
         std::fclose(f);
-        std::printf("[IngameFM] Dumped %cache to %s (%d samples)\n", type, filename.c_str(), u_count);
+        std::printf("[IngameFM] Dumped %c cache to %s (%d samples)\n", type, filename.c_str(), u_count);
     }
 
-    // Helper: Parse binary data from memory
     template<typename T>
     T _parse_cache_data(const uint8_t* data, size_t len, char expectedType) {
         T result;
         result.valid = false;
 
-        if(len < 16) return result; // Too small for header
+        if(len < 16) return result;
 
-        // Read Magic
         if(data[0] != 'I' || data[1] != 'F' || data[2] != expectedType || data[3] != 'C') {
             std::fprintf(stderr, "[IngameFM] Invalid cache magic header. Expected 'IF%cC'.\n", expectedType);
             return result;
