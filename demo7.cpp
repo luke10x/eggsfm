@@ -373,73 +373,81 @@ struct ModImgui
 
 // =============================================================================
 // 9. SOUND SYSTEM
-//
-// Encapsulates IngameFMPlayer + SDL audio device.
-// init()     — opens device, loads patches, defines song/SFX, starts playback
-// teardown() — stops playback, closes device, resets player
 // =============================================================================
+
+struct SfxInfo { int id; const char* name; const char* pattern; int tick; int speed; int dur; int pri; };
+static const SfxInfo SFX_LIST[] = {
+    { SFX_ID_JUMP,    "JUMP",    SFX_JUMP,    60, 3, 10, 4 },
+    { SFX_ID_COIN,    "COIN",    SFX_COIN,    60, 3,  8, 3 },
+    { SFX_ID_ALARM,   "ALARM",   SFX_ALARM,   60, 3, 12, 5 },
+    { SFX_ID_FANFARE, "FANFARE", SFX_FANFARE, 60, 3, 20, 6 },
+};
+static constexpr int SFX_COUNT = 4;
 
 struct SoundSystem
 {
-    IngameFMPlayer  player;
-    SDL_AudioDeviceID dev = 0;
-    bool            running = false;
-    std::string     lastError;
+    IngameFMPlayer    player;
+    SDL_AudioDeviceID dev     = 0;
+    bool              running = false;
+    bool              isLive  = true;
+    std::string       lastError;
 
-    // Settings (set before calling init)
-    int sampleRate  = 44100;
-    int bufferFrames = 256;
-    IngameFMChipType chipType = IngameFMChipType::YM3438;  // must be power-of-2, >= 256 for Web Audio API
+    // Cached rate — survives teardown
+    int               cachedRate = 0;
 
-    bool init()
-    {
-        if(running) teardown();
-        lastError.clear();
+    // Settings
+    int              sampleRate   = 44100;
+    int              bufferFrames = 256;
+    IngameFMChipType chipType     = IngameFMChipType::YM3438;
 
-        // Clamp bufferFrames to power-of-two in [256..4096]
-        int bf = bufferFrames;
-        if(bf < 256) bf = 256;
-        // Find next power of two
-        int p = 256;
-        while(p < bf && p < 4096) p <<= 1;
-        bf = p;
+    // ── Cache state queries (thread-safe reads) ───────────────────────────────
+    bool isCapturePending()  const { return running && isLive && player.is_capture_pending(); }
+    bool isCaching()         const { return running && isLive && player.is_capturing(); }
+    bool isCaptureSession()  const { return running && isLive && player.is_capture_session(); }
 
-        player.set_sample_rate(sampleRate);
-        player.set_chip_type(chipType);
+    // Song: rows done / total
+    int songRowsDone()  const { return player.capture_song_rows_done(); }
+    int songRowsTotal() const { return player.get_song_length(); }
+    bool songCached()   const { return player.is_song_captured(); }
 
-        // Patches — same IDs as bowling app
+    // SFX: rows done / total per id
+    int sfxRowsDone(int id)  const { return player.capture_sfx_rows_done(id); }
+    int sfxRowsTotal(int id) const { return player.capture_sfx_total_rows(id); }
+    bool sfxCached(int id)   const {
+        int t = sfxRowsTotal(id);
+        return t > 0 && sfxRowsDone(id) >= t;
+    }
+
+    bool allCached() const {
+        if(!songCached()) return false;
+        for(auto& s : SFX_LIST) if(!sfxCached(s.id)) return false;
+        return true;
+    }
+    // Called from main thread after allCached() becomes true
+    void onCacheComplete() {
+        if(allCached() && cachedRate == 0) cachedRate = sampleRate;
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    void loadPatches() {
         player.add_patch(0x00, PATCH_00);
         player.add_patch(0x01, PATCH_01);
-        // inst 02 — hi-hat (very quiet, used at vol 06 in pattern)
         player.add_patch(0x02, PATCH_HIHAT);
-        // SFX patches
         player.add_patch(0x11, PATCH_HIHAT);
         player.add_patch(0x12, PATCH_CLANG);
         player.add_patch(0x14, PATCH_ELECTRIC_BASS);
-
         player.sfx_set_voices(3);
+    }
 
-        // Define song
-        try {
-            player.song_define(1, SONG, 60, 6);
-        } catch(const std::exception& e) {
-            lastError = std::string("song_define failed: ") + e.what();
-            return false;
-        }
+    void defineSounds() {
+        player.song_define(1, SONG, 60, 6);
+        for(auto& s : SFX_LIST)
+            player.sfx_define(s.id, s.pattern, s.tick, s.speed);
+    }
 
-        // Define SFX — speed=3 gives ~50ms/row for snappy game feel.
-        // SFX patterns use inst 0x12 (CLANG) and 0x14 (HIHAT) — both registered above.
-        try {
-            player.sfx_define(SFX_ID_JUMP,    SFX_JUMP,    60, 3);
-            player.sfx_define(SFX_ID_COIN,    SFX_COIN,    60, 3);
-            player.sfx_define(SFX_ID_ALARM,   SFX_ALARM,   60, 3);
-            player.sfx_define(SFX_ID_FANFARE, SFX_FANFARE, 60, 3);
-        } catch(const std::exception& e) {
-            lastError = std::string("sfx_define failed: ") + e.what();
-            return false;
-        }
-
-        // Open SDL audio device
+    bool openDevice() {
+        int bf = bufferFrames < 256 ? 256 : bufferFrames;
+        int p = 256; while(p < bf && p < 4096) p <<= 1; bf = p;
         SDL_AudioSpec desired{};
         desired.freq     = sampleRate;
         desired.format   = AUDIO_S16SYS;
@@ -447,52 +455,91 @@ struct SoundSystem
         desired.samples  = static_cast<Uint16>(bf);
         desired.callback = IngameFMPlayer::s_audio_callback;
         desired.userdata = &player;
-
         SDL_AudioSpec obtained{};
         dev = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
-        if(dev == 0) {
-            lastError = std::string("SDL_OpenAudioDevice failed: ") + SDL_GetError();
-            return false;
-        }
-        // Log if SDL gave a different rate than requested
-        if(obtained.freq != sampleRate) {
-            printf("[demo7] Warning: SDL gave %d Hz instead of requested %d\n",
-                   obtained.freq, sampleRate);
-        }
-
-        // Select and start song
-        try {
-            player.song_select(1, /*loop=*/true);
-        } catch(const std::exception& e) {
-            lastError = std::string("song_select failed: ") + e.what();
-            SDL_CloseAudioDevice(dev); dev=0;
-            return false;
-        }
-
-        player.start(dev, /*loop=*/true);
-        SDL_PauseAudioDevice(dev, 0);
-
-        running = true;
-        printf("[demo7] Sound system started: sr=%d  buf=%d  spr=%d\n",
-               sampleRate, bf, sampleRate/60*6);
+        if(dev == 0) { lastError = std::string("SDL_OpenAudioDevice: ") + SDL_GetError(); return false; }
+        if(obtained.freq != sampleRate)
+            printf("[demo7] Warning: SDL gave %d Hz (requested %d)\n", obtained.freq, sampleRate);
         return true;
     }
 
-    void teardown()
-    {
-        if(!running) return;
-        if(dev) {
-            player.stop(dev);
-            SDL_CloseAudioDevice(dev);
-            dev = 0;
-        }
-        player.reset();  // clears all songs, SFX, patches, chip state
-        running = false;
-        printf("[demo7] Sound system torn down.\n");
+    // ── Start live ────────────────────────────────────────────────────────────
+    bool startLive() {
+        if(running) teardown();
+        lastError.clear();
+        // Reset player — this clears any existing cache
+        player.reset();
+        cachedRate = 0;
+        player.set_sample_rate(sampleRate);
+        player.set_chip_type(chipType);
+        player.set_build_cache(false);
+        player.set_play_cache(false);
+        loadPatches();
+        try { defineSounds(); }
+        catch(const std::exception& e) { lastError = e.what(); return false; }
+        if(!openDevice()) return false;
+        player.song_select(1, true);
+        player.start(dev, true);
+        SDL_PauseAudioDevice(dev, 0);
+        running = true; isLive = true;
+        printf("[demo7] Live: sr=%d buf=%d\n", sampleRate, bufferFrames);
+        return true;
     }
 
-    void sfx_play(int id, int priority, int duration)
-    {
+    // ── Recording control ────────────────────────────────────────────────────
+    void startCapture() {
+        if(!running || !isLive) return;
+        SDL_LockAudioDevice(dev);
+        player.request_capture();  // begins at next loop boundary
+        SDL_UnlockAudioDevice(dev);
+        printf("[demo7] Capture requested (pending next loop)\n");
+    }
+
+    void cancelCapture() {
+        if(!running) return;
+        SDL_LockAudioDevice(dev);
+        player.cancel_capture();
+        SDL_UnlockAudioDevice(dev);
+        printf("[demo7] Capture cancelled\n");
+    }
+
+    // ── Start cached ─────────────────────────────────────────────────────────
+    bool startCached() {
+        if(cachedRate == 0) { lastError = "No cache recorded yet."; return false; }
+        if(sampleRate != cachedRate) {
+            lastError = "Rate must be " + std::to_string(cachedRate) + " Hz to use cache.";
+            return false;
+        }
+        if(running) {
+            // Stop audio device but preserve player state (cache lives in player)
+            if(dev) { player.stop(dev); SDL_CloseAudioDevice(dev); dev=0; }
+            running = false;
+        }
+        lastError.clear();
+        player.set_play_cache(true);
+        player.set_sample_rate(sampleRate);
+        player.set_chip_type(chipType);
+        if(!openDevice()) return false;
+        player.song_select(1, true);
+        player.start(dev, true);
+        SDL_PauseAudioDevice(dev, 0);
+        running = true; isLive = false;
+        printf("[demo7] Cached: sr=%d buf=%d\n", sampleRate, bufferFrames);
+        return true;
+    }
+
+    // ── Teardown ─────────────────────────────────────────────────────────────
+    void teardown() {
+        if(!running) return;
+        if(dev) { player.stop(dev); SDL_CloseAudioDevice(dev); dev=0; }
+        // Don't reset player — preserve cache
+        player.set_play_cache(false);
+        player.cancel_capture();
+        running = false;
+        printf("[demo7] Teardown\n");
+    }
+
+    void sfx_play(int id, int priority, int duration) {
         if(!running || !dev) return;
         SDL_LockAudioDevice(dev);
         player.sfx_play(id, priority, duration);
@@ -518,14 +565,19 @@ struct AppState
     float musicVol = 1.0f;
     float sfxVol   = 1.0f;
 
-    Uint32 lastTick  = 0;
-    float  fpsSmooth = 0.0f;
+    Uint32 lastTick    = 0;
+    float  fpsSmooth   = 0.0f;
+    // Display values — updated at most once per 500ms
+    float  displayFps  = 0.0f;
+    float  displayMs   = 0.0f;
+    Uint32 lastDisplay = 0;
     bool   running   = true;
 
     // UI state
-    int  selectedRate   = 2;   // index into RATES[] — default 44100 Hz
-    int  selectedBuf    = 1;   // index into BUFS[]
-    int  selectedChip   = 0;   // index into CHIPS[] — default YM3438 (clean)
+    int  selectedRate = 2;   // index into RATES[]
+    int  selectedBuf  = 1;   // index into BUFS[]
+    int  selectedChip = 0;   // index into CHIPS[]
+    bool showError    = false;
 };
 
 static AppState g_app;
@@ -546,26 +598,23 @@ static const char* CHIP_LBLS[]         = { "YM3438 — Clean", "YM2612 — Authe
 static void drawPanel(AppState& app)
 {
     ImGuiIO& io = ImGui::GetIO();
-    const float panelW = 380.f;
+    const float panelW = 400.f;
     const float panelH = (float)app.winH - 40.f;
     ImGui::SetNextWindowPos(
-        ImVec2((io.DisplaySize.x - panelW)*0.5f, (io.DisplaySize.y - panelH)*0.5f),
-        ImGuiCond_Always);
+        ImVec2((io.DisplaySize.x-panelW)*0.5f,(io.DisplaySize.y-panelH)*0.5f), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(panelW, panelH), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.85f);
-
     ImGui::Begin("ingamefm demo7", nullptr,
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoCollapse);
+        ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize|
+        ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoScrollbar);
 
-    // ── Audio system init/teardown ────────────────────────────────────────────
-    ImGui::SeparatorText("Audio System");
+    SoundSystem& s = app.sound;
+    bool isCapturing = s.isCaching();
 
-    // Rate selector (disabled when running)
-    ImGui::BeginDisabled(app.sound.running);
-    ImGui::Text("Sample rate");  // Note: lower rates = slower envelopes
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(110.f);
+    // ── Settings ─────────────────────────────────────────────────────────────
+    ImGui::SeparatorText("Settings");
+    ImGui::BeginDisabled(s.running);
+    ImGui::Text("Rate"); ImGui::SameLine(); ImGui::SetNextItemWidth(108.f);
     if(ImGui::BeginCombo("##rate", RATE_LBLS[app.selectedRate])) {
         for(int i=0;i<4;i++) {
             bool sel=(i==app.selectedRate);
@@ -574,10 +623,7 @@ static void drawPanel(AppState& app)
         }
         ImGui::EndCombo();
     }
-    ImGui::SameLine();
-    ImGui::Text("Buffer");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(70.f);
+    ImGui::SameLine(); ImGui::Text("Buf"); ImGui::SameLine(); ImGui::SetNextItemWidth(68.f);
     if(ImGui::BeginCombo("##buf", BUF_LBLS[app.selectedBuf])) {
         for(int i=0;i<4;i++) {
             bool sel=(i==app.selectedBuf);
@@ -587,114 +633,196 @@ static void drawPanel(AppState& app)
         ImGui::EndCombo();
     }
     ImGui::Spacing();
-    ImGui::Text("Chip");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(-1.f);
+    ImGui::Text("Chip"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1.f);
     if(ImGui::BeginCombo("##chip", CHIP_LBLS[app.selectedChip])) {
         for(int i=0;i<2;i++) {
             bool sel=(i==app.selectedChip);
             if(ImGui::Selectable(CHIP_LBLS[i],sel)) app.selectedChip=i;
             if(sel) ImGui::SetItemDefaultFocus();
-
         }
         ImGui::EndCombo();
     }
     ImGui::EndDisabled();
 
-    ImGui::Spacing();
+    // ── Cache progress (always visible) ──────────────────────────────────────
+    ImGui::SeparatorText("Cache");
+    {
+        // Song bar
+        int songDone  = s.songRowsDone();
+        int songTotal = s.songRowsTotal();
+        bool songOk   = s.songCached();
+        bool capPend  = s.isCapturePending();
+        bool capActive = s.isCaching();
+        float frac    = (songTotal>0) ? (float)songDone/songTotal : 0.f;
+        char  overlay[64];
+        const char* songStatus = songOk ? "done" : (capActive ? "recording..." : (capPend ? "pending..." : ""));
+        snprintf(overlay, sizeof(overlay), "Song  %d/%d  %s", songDone, songTotal>0?songTotal:0, songStatus);
+        ImVec4 songCol = songOk ? ImVec4(0.2f,0.7f,0.2f,1.f)
+                       : (capPend ? ImVec4(0.35f,0.35f,0.35f,1.f)
+                       : ImVec4(0.5f,0.45f,0.1f,1.f));
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, songCol);
+        ImGui::ProgressBar(frac, ImVec2(-1,0), overlay);
+        ImGui::PopStyleColor();
 
-    if(!app.sound.running) {
-        if(ImGui::Button("Init Sound System", ImVec2(-1, 0))) {
-            app.sound.sampleRate   = RATES[app.selectedRate];
-            app.sound.bufferFrames = BUFS[app.selectedBuf];
-            app.sound.chipType     = CHIPS[app.selectedChip];
-            if(!app.sound.init()) {
-                fprintf(stderr, "[demo7] Init failed: %s\n",
-                        app.sound.lastError.c_str());
-            } else {
-                app.musicVol = 1.0f;
-                app.sfxVol   = 1.0f;
-                app.sound.player.set_music_volume(app.musicVol);
-                app.sound.player.set_sfx_volume(app.sfxVol);
+        // SFX bars
+        for(auto& info : SFX_LIST) {
+            int done  = s.sfxRowsDone(info.id);
+            int total = s.sfxRowsTotal(info.id);
+            bool ok   = s.sfxCached(info.id);
+            float f2  = (total>0) ? (float)done/total : 0.f;
+            const char* sfxStatus = ok ? "done" : (s.isCaptureSession() ? "play to record" : (capPend ? "pending..." : ""));
+            snprintf(overlay, sizeof(overlay), "SFX %s  %d/%d  %s", info.name, done, total>0?total:0, sfxStatus);
+            ImVec4 sfxCol = ok ? ImVec4(0.2f,0.7f,0.2f,1.f)
+                          : ((capPend || (s.isCaptureSession() && !ok)) ? ImVec4(0.35f,0.35f,0.35f,1.f)
+                          : ImVec4(0.5f,0.45f,0.1f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, sfxCol);
+            ImGui::ProgressBar(f2, ImVec2(-1,0), overlay);
+            ImGui::PopStyleColor();
+        }
+
+        if(s.allCached() && s.cachedRate>0)
+            ImGui::TextColored(ImVec4(0.3f,1.f,0.3f,1.f),
+                "All cached at %d Hz", s.cachedRate);
+        else if(s.cachedRate==0 && !s.allCached())
+            ImGui::TextDisabled("Not recorded");
+    }
+
+    // ── Controls ─────────────────────────────────────────────────────────────
+    ImGui::SeparatorText("Controls");
+
+    if(!s.running) {
+        if(ImGui::Button("Start Live", ImVec2(-1,0))) {
+            s.sampleRate   = RATES[app.selectedRate];
+            s.bufferFrames = BUFS[app.selectedBuf];
+            s.chipType     = CHIPS[app.selectedChip];
+            app.showError  = false;
+            if(s.startLive()) {
+                app.musicVol=1.f; app.sfxVol=1.f;
+                s.player.set_music_volume(1.f);
+                s.player.set_sfx_volume(1.f);
+            } else app.showError=true;
+        }
+        // Start Cached — only when cache exists
+        ImGui::BeginDisabled(!s.allCached());
+        char cachedLbl[64] = "Start Cached";
+        if(s.allCached() && s.cachedRate>0)
+            snprintf(cachedLbl,sizeof(cachedLbl),"Start Cached (%d Hz)", s.cachedRate);
+        if(ImGui::Button(cachedLbl, ImVec2(-1,0))) {
+            s.sampleRate   = s.cachedRate;
+            s.bufferFrames = BUFS[app.selectedBuf];
+            s.chipType     = CHIPS[app.selectedChip];
+            app.showError  = false;
+            for(int i=0;i<4;i++) if(RATES[i]==s.cachedRate){app.selectedRate=i;break;}
+            if(!s.startCached()) app.showError=true;
+            else {
+                app.musicVol=1.f; app.sfxVol=1.f;
+                s.player.set_music_volume(1.f);
+                s.player.set_sfx_volume(1.f);
             }
         }
-        if(!app.sound.lastError.empty()) {
+        ImGui::EndDisabled();
+        if(app.showError && !s.lastError.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f,0.3f,0.3f,1.f));
-            ImGui::TextWrapped("%s", app.sound.lastError.c_str());
+            ImGui::TextWrapped("%s", s.lastError.c_str());
             ImGui::PopStyleColor();
         }
     } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f,0.1f,0.1f,1.f));
-        if(ImGui::Button("Teardown Sound System", ImVec2(-1, 0)))
-            app.sound.teardown();
-        ImGui::PopStyleColor();
-
-        // ── Status ───────────────────────────────────────────────────────────
-        ImGui::Spacing();
-        ImGui::TextDisabled("sr=%d  buf=%d  row %d/%d",
-            app.sound.sampleRate,
-            app.sound.bufferFrames,
-            app.sound.player.get_current_row(),
-            app.sound.player.get_song_length());
+        // ── Running ───────────────────────────────────────────────────────────
+        if(s.isLive)
+            ImGui::TextColored(ImVec4(0.9f,0.7f,0.2f,1.f),"LIVE  sr=%d  buf=%d  row %d/%d",
+                s.sampleRate,s.bufferFrames,
+                s.player.get_current_row(),s.player.get_song_length());
+        else
+            ImGui::TextColored(ImVec4(0.3f,1.f,0.3f,1.f),"CACHED  sr=%d  buf=%d  row %d/%d",
+                s.sampleRate,s.bufferFrames,
+                s.player.get_current_row(),s.player.get_song_length());
         ImGui::TextDisabled("%s", CHIP_LBLS[app.selectedChip]);
+
+        ImGui::Spacing();
+
+        // Record / Cancel / Clear buttons — only in live mode
+        if(s.isLive) {
+            if(!s.allCached()) {
+                // Not fully cached yet — show Record / Cancel Record
+                bool isPending = s.isCapturePending();
+                if(!isCapturing && !isPending) {
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.5f,0.15f,0.0f,1.f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f,0.3f, 0.0f,1.f));
+                    if(ImGui::Button("Record Cache", ImVec2(-1,0)))
+                        s.startCapture();
+                    ImGui::PopStyleColor(2);
+                } else {
+                    // Pending or active — show cancel
+                    const char* lbl = isPending ? "Cancel (waiting for loop end...)" : "Cancel Recording";
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.5f,0.0f,0.0f,1.f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f,0.1f,0.1f,1.f));
+                    if(ImGui::Button(lbl, ImVec2(-1,0)))
+                        s.cancelCapture();
+                    ImGui::PopStyleColor(2);
+                }
+            } else {
+                // Fully cached — offer re-record (which resets cache)
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f,0.2f,0.2f,1.f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f,0.35f,0.35f,1.f));
+                if(ImGui::Button("Re-record Cache (resets)", ImVec2(-1,0))) {
+                    s.cachedRate = 0;
+                    s.startCapture();  // request_capture at next loop
+                }
+                ImGui::PopStyleColor(2);
+            }
+        }
+
+        // Teardown
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f,0.08f,0.08f,1.f));
+        if(ImGui::Button("Teardown", ImVec2(-1,0))) s.teardown();
+        ImGui::PopStyleColor();
 
         ImGui::Separator();
 
-        // ── Volume sliders ────────────────────────────────────────────────────
+        // Volume
         ImGui::SeparatorText("Volume");
-        {
-            int mv = static_cast<int>(app.musicVol * 100.f + 0.5f);
-            ImGui::SetNextItemWidth(160.f);
-            if(ImGui::SliderInt("Music##vol", &mv, 0, 100, "%d%%")) {
-                app.musicVol = mv / 100.f;
-                app.sound.player.set_music_volume(app.musicVol);
-            }
-            ImGui::SameLine();
-            int sv = static_cast<int>(app.sfxVol * 100.f + 0.5f);
-            ImGui::SetNextItemWidth(160.f);
-            if(ImGui::SliderInt("SFX##vol", &sv, 0, 100, "%d%%")) {
-                app.sfxVol = sv / 100.f;
-                app.sound.player.set_sfx_volume(app.sfxVol);
-            }
+        int mv=(int)(app.musicVol*100.f+0.5f);
+        ImGui::SetNextItemWidth(160.f);
+        if(ImGui::SliderInt("Music##vol",&mv,0,100,"%d%%")) {
+            app.musicVol=mv/100.f; s.player.set_music_volume(app.musicVol);
+        }
+        ImGui::SameLine();
+        int sv=(int)(app.sfxVol*100.f+0.5f);
+        ImGui::SetNextItemWidth(160.f);
+        if(ImGui::SliderInt("SFX##vol",&sv,0,100,"%d%%")) {
+            app.sfxVol=sv/100.f; s.player.set_sfx_volume(app.sfxVol);
         }
 
         ImGui::Separator();
 
-        // ── SFX buttons ───────────────────────────────────────────────────────
+        // SFX buttons
         ImGui::SeparatorText("Sound Effects");
-        ImGui::Spacing();
-
         struct SfxBtn { int id; int pri; int dur; const char* label; ImVec4 col; };
         static const SfxBtn btns[] = {
-            { SFX_ID_JUMP,    4, 10, "[q] JUMP\np4",    ImVec4(0.2f,0.5f,0.8f,1.f) },
-            { SFX_ID_COIN,    3,  8, "[w] COIN\np3",    ImVec4(0.8f,0.7f,0.1f,1.f) },
-            { SFX_ID_ALARM,   5, 12, "[e] ALARM\np5",   ImVec4(0.8f,0.4f,0.1f,1.f) },
-            { SFX_ID_FANFARE, 6, 20, "[r] FANFARE\np6", ImVec4(0.6f,0.1f,0.6f,1.f) },
+            { SFX_ID_JUMP,    4,10,"[q] JUMP",    ImVec4(0.2f,0.5f,0.8f,1.f) },
+            { SFX_ID_COIN,    3, 8,"[w] COIN",    ImVec4(0.8f,0.7f,0.1f,1.f) },
+            { SFX_ID_ALARM,   5,12,"[e] ALARM",   ImVec4(0.8f,0.4f,0.1f,1.f) },
+            { SFX_ID_FANFARE, 6,20,"[r] FANFARE", ImVec4(0.6f,0.1f,0.6f,1.f) },
         };
-        const float bw = (panelW - 40.f) / 2.f;
+        const float bw=(panelW-40.f)/2.f;
         for(int i=0;i<4;i++) {
-            if(i%2 != 0) ImGui::SameLine();
-            const SfxBtn& b = btns[i];
-            ImVec4 dim(b.col.x*0.35f, b.col.y*0.35f, b.col.z*0.35f, 0.9f);
-            ImVec4 hov(b.col.x*0.6f,  b.col.y*0.6f,  b.col.z*0.6f,  1.0f);
+            if(i%2!=0) ImGui::SameLine();
+            const SfxBtn& b=btns[i];
+            ImVec4 dim(b.col.x*0.35f,b.col.y*0.35f,b.col.z*0.35f,0.9f);
+            ImVec4 hov(b.col.x*0.6f, b.col.y*0.6f, b.col.z*0.6f, 1.0f);
             ImGui::PushStyleColor(ImGuiCol_Button,        dim);
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hov);
             ImGui::PushStyleColor(ImGuiCol_ButtonActive,  b.col);
-            if(ImGui::Button(b.label, ImVec2(bw, 44.f)))
-                app.sound.sfx_play(b.id, b.pri, b.dur);
+            if(ImGui::Button(b.label, ImVec2(bw,36.f)))
+                s.sfx_play(b.id,b.pri,b.dur);
             ImGui::PopStyleColor(3);
         }
     }
 
     ImGui::Separator();
-    {
-        float ms = (app.fpsSmooth > 0.f) ? (1000.f/app.fpsSmooth) : 0.f;
-        ImGui::TextDisabled("%.0f fps  |  %.2f ms/frame", app.fpsSmooth, ms);
-    }
-
+    ImGui::TextDisabled("%.0f fps  %.2f ms", app.displayFps, app.displayMs);
     ImGui::End();
 }
-
 // =============================================================================
 // 12. MAIN TICK
 // =============================================================================
@@ -709,6 +837,14 @@ static void mainTick()
     if(dt>0.1f) dt=0.1f;
     float fps = (dt>0.0001f) ? (1.f/dt) : 9999.f;
     app.fpsSmooth = (app.fpsSmooth<1.f) ? fps : app.fpsSmooth*0.9f+fps*0.1f;
+    if(now - app.lastDisplay >= 500) {
+        app.displayFps  = app.fpsSmooth;
+        app.displayMs   = (app.fpsSmooth > 0.f) ? (1000.f/app.fpsSmooth) : 0.f;
+        app.lastDisplay = now;
+    }
+
+    // Check if cache just became complete
+    if(app.sound.allCached()) app.sound.onCacheComplete();
 
     SDL_Event e;
     while(SDL_PollEvent(&e)) {

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <memory>
 #include "ymfm.h"
 #include "ymfm_opn.h"
 
@@ -92,29 +93,32 @@ public:
     void reset() { chip.reset(); }
 };
 
-// IngameFMChip — runtime-selectable chip type wrapper
+// IngameFMChip — runtime-selectable chip type wrapper.
+// Only the selected chip is allocated — no wasted init cost.
 class IngameFMChip
 {
 public:
-    static constexpr uint32_t YM_CLOCK = 7670453; // used for FNUM (always 2612 clock)
+    static constexpr uint32_t YM_CLOCK = 7670453;
 
     IngameFMChipType chip_type = IngameFMChipType::YM3438;
 
-    // Chip instances — only one is active at a time based on chip_type
-    IngameFMChipImpl<IngameFMChipType::YM2612> chip2612;
-    IngameFMChipImpl<IngameFMChipType::YM3438> chip3438;
+    // Only one of these is non-null at a time
+    std::unique_ptr<IngameFMChipImpl<IngameFMChipType::YM2612>> chip2612;
+    std::unique_ptr<IngameFMChipImpl<IngameFMChipType::YM3438>> chip3438;
 
-    IngameFMChip() { reset_chip(); }
+    IngameFMChip() { allocate_chip(chip_type); }
 
     void set_chip_type(IngameFMChipType t) {
         chip_type = t;
-        reset_chip();
+        chip2612.reset();
+        chip3438.reset();
+        allocate_chip(t);
     }
 
     void reset_chip() {
         switch(chip_type) {
-            case IngameFMChipType::YM2612: chip2612.reset(); break;
-            case IngameFMChipType::YM3438: chip3438.reset(); break;
+            case IngameFMChipType::YM2612: if(chip2612) chip2612->reset(); break;
+            case IngameFMChipType::YM3438: if(chip3438) chip3438->reset(); break;
         }
     }
 
@@ -122,11 +126,11 @@ public:
         uint8_t addr = port * 2;
         switch(chip_type) {
             case IngameFMChipType::YM2612:
-                chip2612.chip.write(addr,   reg);
-                chip2612.chip.write(addr+1, val); break;
+                chip2612->chip.write(addr,   reg);
+                chip2612->chip.write(addr+1, val); break;
             case IngameFMChipType::YM3438:
-                chip3438.chip.write(addr,   reg);
-                chip3438.chip.write(addr+1, val); break;
+                chip3438->chip.write(addr,   reg);
+                chip3438->chip.write(addr+1, val); break;
         }
     }
 
@@ -135,18 +139,27 @@ public:
         switch(chip_type) {
             case IngameFMChipType::YM2612: {
                 ymfm::ym2612::output_data out;
-                chip2612.chip.generate(&out, 1);
+                chip2612->chip.generate(&out, 1);
                 l=out.data[0]; r=out.data[1]; break;
             }
             case IngameFMChipType::YM3438: {
                 ymfm::ym3438::output_data out;
-                chip3438.chip.generate(&out, 1);
+                chip3438->chip.generate(&out, 1);
                 l=out.data[0]; r=out.data[1]; break;
             }
         }
         *L = static_cast<int16_t>(std::max(-32768, std::min(32767, l)));
         *R = static_cast<int16_t>(std::max(-32768, std::min(32767, r)));
     }
+
+private:
+    void allocate_chip(IngameFMChipType t) {
+        switch(t) {
+            case IngameFMChipType::YM2612: chip2612 = std::make_unique<IngameFMChipImpl<IngameFMChipType::YM2612>>(); break;
+            case IngameFMChipType::YM3438: chip3438 = std::make_unique<IngameFMChipImpl<IngameFMChipType::YM3438>>(); break;
+        }
+    }
+public:
 
     void load_patch(const YM2612Patch& p, int ch)
     {

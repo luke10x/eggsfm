@@ -293,6 +293,18 @@ public:
         if(!sfx_defs_present_[id]) return;
         if(sfx_voices_==0||!ym_sfx_) return;
         const SfxDef& def = sfx_defs_[id];
+
+        // In capture mode (or after song is captured): allocate capture buffer for this SFX
+        bool sfx_capturing = capture_session_active_;
+        if(sfx_capturing && sfx_cache_.find(id)==sfx_cache_.end()) {
+            CachedAudio c;
+            c.samples_per_row = def.samples_per_row;
+            c.total_rows      = def.song.num_rows;
+            c.samples.assign(def.song.num_rows * def.samples_per_row * 2, 0);
+            c.valid = true;  // mark valid immediately so callback can write to it
+            sfx_cache_[id] = std::move(c);
+            capture_sfx_rows_done_[id] = 0;
+        }
         int best_v=-1, best_prio=priority;
         for(int v=sfx_voices_-1;v>=0;--v) {
             if(!sfx_voice_[v].active()) { best_v=v; best_prio=-1; break; }
@@ -334,6 +346,49 @@ public:
     void set_play_cache (bool v) { play_cache_  = v; }
     // Convenience: set_cache(true) enables both build and play.
     void set_cache(bool v)       { build_cache_ = v; play_cache_ = v; }
+
+    // Live capture API.
+    // request_capture(): schedules capture to begin at the next loop boundary (row 0).
+    //   Sets capture_pending_=true. The callback will flip to capture_mode_ at row 0.
+    //   capture_session_active_ stays true for the whole session until cancel/complete.
+    //   Call while audio device is locked.
+    void request_capture() {
+        capture_sfx_rows_done_.clear();
+        capture_song_rows_done_.store(0);
+        capture_song_done_      = false;
+        capture_pending_        = true;
+        capture_mode_           = false;
+        capture_session_active_ = true;
+        // One SFX voice during capture so output maps cleanly to one buffer
+        sfx_voices_captured_    = sfx_voices_;
+        sfx_voices_             = 1;
+        // Erase old caches so they get freshly allocated at loop start
+        if(current_song_id_ >= 0) song_cache_.erase(current_song_id_);
+        sfx_cache_.clear();
+    }
+    void cancel_capture() {
+        capture_pending_        = false;
+        capture_mode_           = false;
+        capture_session_active_ = false;
+        // Restore original sfx voice count
+        if(sfx_voices_captured_ > 0) {
+            sfx_voices_          = sfx_voices_captured_;
+            sfx_voices_captured_ = 0;
+        }
+    }
+    bool is_capture_pending()   const { return capture_pending_; }
+    bool is_capturing()         const { return capture_mode_; }
+    bool is_song_captured()     const { return capture_song_done_; }
+    bool is_capture_session()   const { return capture_session_active_; }
+    int  capture_song_rows_done()  const { return capture_song_rows_done_.load(); }
+    int  capture_sfx_rows_done(int sfx_id) const {
+        auto it = capture_sfx_rows_done_.find(sfx_id);
+        return it != capture_sfx_rows_done_.end() ? it->second : 0;
+    }
+    int  capture_sfx_total_rows(int sfx_id) const {
+        if(!sfx_defs_present_[sfx_id]) return 0;
+        return sfx_defs_[sfx_id].song.num_rows;
+    }
     // use_cache_: legacy public bool — assigning true sets both build and play,
     // assigning false clears both. Kept for backward compatibility.
     // Prefer set_build_cache() / set_play_cache() for finer control.
@@ -360,6 +415,10 @@ public:
         current_song_id_=-1;
         music_vol_.store(1.0f); sfx_vol_.store(1.0f);
         build_cache_=false; play_cache_=false; use_cache_=false;
+        capture_mode_=false; capture_pending_=false; capture_song_done_=false;
+        capture_session_active_=false; sfx_voices_captured_=0;
+        capture_song_rows_done_.store(0);
+        capture_sfx_rows_done_.clear();
         chip_type_=IngameFMChipType::YM3438;
         // sample_rate_ intentionally kept — caller sets it again before re-init
     }
@@ -487,6 +546,15 @@ private:
 
     int sample_rate_ = 44100;
     IngameFMChipType chip_type_ = IngameFMChipType::YM3438;
+
+    // ── Live capture state ────────────────────────────────────────────────────
+    bool capture_pending_        = false;  // waiting for next loop boundary
+    bool capture_mode_           = false;  // actively capturing song
+    bool capture_song_done_      = false;  // one full song loop captured
+    bool capture_session_active_ = false;  // true from request until cancel/complete
+    int  sfx_voices_captured_    = 0;      // saved sfx_voices_ value during session
+    std::atomic<int>             capture_song_rows_done_{0};
+    std::unordered_map<int,int>  capture_sfx_rows_done_;
     static constexpr int KEY_OFF_GAP_SAMPLES = 44;
     // Pre-allocated scratch buffer for SFX generate — avoids heap alloc per callback.
     // Sized for max samples_per_row at 48000 Hz with speed=12: 48000/60*12 = 9600 frames.
@@ -741,6 +809,12 @@ private:
             if(in_gap&&vs.sample_in_row>=KEY_OFF_GAP_SAMPLES) sfx_commit_keyon(v);
             if(vs.sample_in_row>=vs.samples_per_row) {
                 vs.sample_in_row=0; vs.ticks_remaining--;
+                // Track SFX capture progress
+                if(capture_session_active_) {
+                    auto it=capture_sfx_rows_done_.find(vs.sfx_id);
+                    if(it!=capture_sfx_rows_done_.end())
+                        it->second = std::min(it->second+1, def.song.num_rows);
+                }
                 if(vs.ticks_remaining<=0) { ym_sfx_->key_off(v); vs=SfxVoiceState{}; return; }
                 vs.current_row++;
                 if(vs.current_row>=(int)def.song.rows.size()) vs.current_row=0;
@@ -794,6 +868,17 @@ private:
             if(mv<1.0f)
                 for(int i=0;i<n;++i) out[i]=static_cast<int16_t>(out[i]*mv);
 
+            // ── Live capture: write music output into song cache ──────────────
+            if(capture_mode_ && !used_cache_music && current_song_id_>=0) {
+                auto it = song_cache_.find(current_song_id_);
+                if(it != song_cache_.end()) {
+                    int base = (current_row_.load() * it->second.samples_per_row + pos_in_row) * 2;
+                    if(base+n <= (int)it->second.samples.size()) {
+                        std::memcpy(&it->second.samples[base], out, n*sizeof(int16_t));
+                    }
+                }
+            }
+
             // ── SFX output ───────────────────────────────────────────────────
             bool any_sfx=false;
             for(int v=0;v<sfx_voices_;++v) if(sfx_voice_[v].active()){any_sfx=true;break;}
@@ -801,10 +886,6 @@ private:
             if(any_sfx && sv>0.0f) {
                 if(play_cache_||use_cache_) {
                     // Mix each active SFX voice from its pre-rendered buffer.
-                    // BUG FIX: iterate over output frames (not individual int16s).
-                    // For frame i (0..to_generate-1): out stereo at [i*2, i*2+1].
-                    // Each voice's cache is also stereo interleaved, so its read
-                    // position is also frame-based.
                     for(int frame=0; frame<to_generate; ++frame) {
                         float mixL = static_cast<float>(out[frame*2]);
                         float mixR = static_cast<float>(out[frame*2+1]);
@@ -814,7 +895,6 @@ private:
                             auto it = sfx_cache_.find(vs.cache_key_id);
                             if(it==sfx_cache_.end()||!it->second.valid) continue;
                             const CachedAudio& c = it->second;
-                            // sample_in_row is the frame offset within the current row
                             int sfx_frame = vs.current_row * c.samples_per_row
                                           + vs.sample_in_row + frame;
                             int sfx_idx   = sfx_frame * 2;
@@ -827,15 +907,30 @@ private:
                         out[frame*2+1] = static_cast<int16_t>(std::max(-32768.f,std::min(32767.f,mixR)));
                     }
                 } else {
-                    // Live chip path — use out as temp (music already written),
-                    // generate SFX into a properly sized stack buffer.
-                    // to_generate <= samples_per_row_ which can exceed 512,
-                    // so allocate on heap to avoid stack overflow.
                     if(ym_sfx_) {
                         ym_sfx_->generate(sfx_scratch_, to_generate, sample_rate_);
                         for(int i=0;i<n;++i) {
                             float m=static_cast<float>(out[i])+static_cast<float>(sfx_scratch_[i])*sv;
                             out[i]=static_cast<int16_t>(std::max(-32768.f,std::min(32767.f,m)));
+                        }
+                        // ── Capture SFX output ───────────────────────────────
+                        if(capture_session_active_) {
+                            for(int v=0;v<sfx_voices_;++v) {
+                                if(!sfx_voice_[v].active()) continue;
+                                const SfxVoiceState& vs = sfx_voice_[v];
+                                int sid = vs.sfx_id;
+                                auto it = sfx_cache_.find(sid);
+                                if(it==sfx_cache_.end()||!it->second.valid) continue;
+                                for(int frame=0;frame<to_generate;++frame) {
+                                    int sfx_frame = vs.current_row * it->second.samples_per_row
+                                                  + vs.sample_in_row + frame;
+                                    int idx = sfx_frame*2;
+                                    if(idx+1 < (int)it->second.samples.size()) {
+                                        it->second.samples[idx]   = sfx_scratch_[frame*2];
+                                        it->second.samples[idx+1] = sfx_scratch_[frame*2+1];
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -863,7 +958,36 @@ private:
             if(sample_in_row_>=samples_per_row_) {
                 sample_in_row_=0;
                 int row=current_row_.load()+1;
+
                 if(row>=(int)song_.rows.size()) {
+                    // ── Loop boundary ─────────────────────────────────────────
+                    // If capture was pending, activate it now (start of new loop)
+                    if(capture_pending_ && !capture_song_done_) {
+                        capture_pending_ = false;
+                        capture_mode_    = true;
+                        capture_song_rows_done_.store(0);
+                        // Allocate fresh song cache buffer
+                        if(current_song_id_ >= 0 && defined_songs_.count(current_song_id_)) {
+                            const DefinedSong& def = defined_songs_[current_song_id_];
+                            CachedAudio c;
+                            c.samples_per_row = def.samples_per_row;
+                            c.total_rows      = def.song.num_rows;
+                            c.samples.assign(def.song.num_rows * def.samples_per_row * 2, 0);
+                            c.valid = false;
+                            song_cache_[current_song_id_] = std::move(c);
+                        }
+                    }
+                    // If currently capturing, one loop just finished — mark song done
+                    else if(capture_mode_) {
+                        if(current_song_id_ >= 0) {
+                            auto it = song_cache_.find(current_song_id_);
+                            if(it != song_cache_.end()) it->second.valid = true;
+                        }
+                        capture_mode_      = false;
+                        capture_song_done_ = true;
+                        capture_song_rows_done_.store((int)song_.rows.size());
+                    }
+
                     if(pending_song_.pending &&
                        pending_song_.when==SongChangeWhen::AT_PATTERN_END) {
                         apply_pending_song();
@@ -875,7 +999,11 @@ private:
                         if(ym_music_) for(int ch=0;ch<MAX_CHANNELS;ch++) ym_music_->key_off(ch);
                         finished_.store(true); return;
                     }
+                } else if(capture_mode_) {
+                    // Mid-loop: update rows-done counter
+                    capture_song_rows_done_.store(row);
                 }
+
                 current_row_.store(row);
                 if(!(play_cache_||use_cache_)) process_row(row);
             }
