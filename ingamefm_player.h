@@ -301,9 +301,15 @@ public:
             c.samples_per_row = def.samples_per_row;
             c.total_rows      = def.song.num_rows;
             c.samples.assign(def.song.num_rows * def.samples_per_row * 2, 0);
-            c.valid = true;  // mark valid immediately so callback can write to it
+            c.valid = true;
             sfx_cache_[id] = std::move(c);
             capture_sfx_rows_done_[id] = 0;
+            std::printf("[IngameFM] SFX %d capture buffer allocated: %d rows x %d spr\n",
+                        id, def.song.num_rows, def.samples_per_row);
+        } else {
+            std::printf("[IngameFM] SFX %d sfx_play: session=%d cache_exists=%d\n",
+                        id, (int)capture_session_active_,
+                        (int)(sfx_cache_.find(id)!=sfx_cache_.end()));
         }
         int best_v=-1, best_prio=priority;
         for(int v=sfx_voices_-1;v>=0;--v) {
@@ -812,8 +818,13 @@ private:
                 // Track SFX capture progress
                 if(capture_session_active_) {
                     auto it=capture_sfx_rows_done_.find(vs.sfx_id);
-                    if(it!=capture_sfx_rows_done_.end())
+                    if(it!=capture_sfx_rows_done_.end()) {
+                        int prev = it->second;
                         it->second = std::min(it->second+1, def.song.num_rows);
+                        if(it->second != prev)
+                            std::printf("[IngameFM] SFX %d rows_done=%d/%d\n",
+                                        vs.sfx_id, it->second, def.song.num_rows);
+                    }
                 }
                 if(vs.ticks_remaining<=0) { ym_sfx_->key_off(v); vs=SfxVoiceState{}; return; }
                 vs.current_row++;
