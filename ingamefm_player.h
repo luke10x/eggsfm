@@ -45,9 +45,8 @@ static int parse_note_field(const char* nc, int line_num) {
     else if (nc[1]=='-') {}
     else throw std::runtime_error(std::string("Line ")+std::to_string(line_num)+": bad accidental");
     if (nc[2]<'0'||nc[2]>'9') throw std::runtime_error(std::string("Line ")+std::to_string(line_num)+": bad octave");
-    // Furnace tracker: C-5 = middle C = MIDI 60. Base = 0.
-    // (Standard MIDI uses C-4 = MIDI 60, but Furnace octaves are 1 higher)
-    return (nc[2]-'0')*12 + semitone;
+    // Furnace octave numbering: C-4 = middle C = 261.6 Hz = MIDI 60.
+    return 12 + (nc[2]-'0')*12 + semitone;
 }
 
 static int parse_hex2(const char* p, int line_num, const char* field_name) {
