@@ -36,17 +36,19 @@ static int parse_note_field(const char* nc, int line_num) {
     if (nc[0]=='O'&&nc[1]=='F'&&nc[2]=='F') return NOTE_OFF;
     int semitone = -1;
     switch (nc[0]) {
-        case 'C': semitone=0;  break; case 'D': semitone=2;  break;
-        case 'E': semitone=4;  break; case 'F': semitone=5;  break;
-        case 'G': semitone=7;  break; case 'A': semitone=9;  break;
-        case 'B': semitone=11; break;
-        default: throw std::runtime_error(std::string("Line ")+std::to_string(line_num)+": bad note '"+std::string(nc,3)+"'");
+    case 'C': semitone=0;  break; case 'D': semitone=2;  break;
+    case 'E': semitone=4;  break; case 'F': semitone=5;  break;
+    case 'G': semitone=7;  break; case 'A': semitone=9;  break;
+    case 'B': semitone=11; break;
+    default: throw std::runtime_error(std::string("Line ")+std::to_string(line_num)+": bad note '"+std::string(nc,3)+"'");
     }
     if      (nc[1]=='#') semitone++;
     else if (nc[1]=='-') {}
     else throw std::runtime_error(std::string("Line ")+std::to_string(line_num)+": bad accidental");
     if (nc[2]<'0'||nc[2]>'9') throw std::runtime_error(std::string("Line ")+std::to_string(line_num)+": bad octave");
-    return 12 + (nc[2]-'0')*12 + semitone;
+    
+    // FIX: Changed base offset from 12 to 24 to correct pitch octave
+    return 24 + (nc[2]-'0')*12 + semitone; 
 }
 
 static int parse_hex2(const char* p, int line_num, const char* field_name) {
