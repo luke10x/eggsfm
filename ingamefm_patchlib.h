@@ -107,12 +107,13 @@ public:
 
     // Set frequency for channel ch (0-5).
     // octaveOffset: additional octave shift (from patch BLOCK field).
-    // sample_rate: ignored — pitch is rate-independent when generate() uses
-    // decimation (see below). Parameter kept for API compatibility.
+    // sample_rate: accepted for API compatibility but not used — pitch is
+    // always computed with fref=44100 to match generate()'s REF_RATE.
     //
-    // Formula: FNUM = F * 2^(21-B) / (YM_CLOCK/144)
-    // The exponent is 21-B (not 20-B which was the previous bug causing
-    // notes to be one octave flat).
+    // generate() calls chip.generate() 44100 times/sec regardless of SDL rate.
+    // So chip's effective output rate is always 44100 Hz, and FNUM must be
+    // computed against that fixed reference: FNUM = hz * 2^(21-B) / 44100.
+    // This makes pitch identical at 22050, 44100, and 48000 Hz.
     void set_frequency(int ch, double hz, int octaveOffset = 0, int /*sample_rate*/ = 44100)
     {
         const uint8_t port = (ch >= 3) ? 1 : 0;
@@ -120,9 +121,9 @@ public:
 
         hz *= std::pow(2.0, static_cast<double>(octaveOffset));
 
-        const double fref = static_cast<double>(YM_CLOCK) / 144.0;
+        static constexpr double FREF = 44100.0;  // matches REF_RATE in generate()
         int block = 4;
-        double fn = hz * static_cast<double>(1 << (21 - block)) / fref;
+        double fn = hz * static_cast<double>(1 << (21 - block)) / FREF;
         while (fn > 0x7FF && block < 7) { block++; fn /= 2.0; }
         while (fn < 0x200 && block > 0) { block--; fn *= 2.0; }
         auto fnum = static_cast<uint16_t>(std::min(0x7FF, std::max(0, static_cast<int>(fn))));
