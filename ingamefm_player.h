@@ -337,14 +337,14 @@ public:
         vs.cache_key_id    = def.cache_key_id;
         sfx_process_row(best_v, 0, true);
         if(capture_session_active_) {
-            // In capture mode: reset chip to silence, commit key-on immediately,
-            // and start writing from sample 0 (no key-off gap pollution).
-            ym_sfx_->reset_chip();
+            // Capture mode: same behavior as live — key-on commits after gap.
+            // The gap samples (0..KEY_OFF_GAP_SAMPLES-1) capture the previous note's
+            // release tail, which is then played back identically in cached mode.
             sfx_commit_keyon(best_v);
-            vs.sample_in_row = 0;  // write from the very start of row 0
+            vs.sample_in_row = KEY_OFF_GAP_SAMPLES;
         } else if(play_cache_||use_cache_) {
-            // Playing from cache: start reading from 0 to match how it was recorded
-            vs.sample_in_row = 0;
+            // Cache playback: start from KEY_OFF_GAP_SAMPLES to match how it was recorded
+            vs.sample_in_row = KEY_OFF_GAP_SAMPLES;
         } else {
             sfx_commit_keyon(best_v);
             vs.sample_in_row = KEY_OFF_GAP_SAMPLES;
@@ -848,11 +848,9 @@ private:
         SfxVoiceState& vs=sfx_voice_[v];
         if(!vs.active()) return;
         const SfxDef& def=sfx_defs_[vs.sfx_id];
-        // In capture mode or cache playback, there is no key-off gap — start from 0
-        bool no_gap = capture_session_active_ || play_cache_ || use_cache_;
         int remaining=samples;
         while(remaining>0) {
-            bool in_gap=!no_gap && vs.sample_in_row<KEY_OFF_GAP_SAMPLES;
+            bool in_gap=vs.sample_in_row<KEY_OFF_GAP_SAMPLES;
             int next_bound=in_gap?KEY_OFF_GAP_SAMPLES:vs.samples_per_row;
             int to_advance=std::min(remaining,next_bound-vs.sample_in_row);
             vs.sample_in_row+=to_advance; remaining-=to_advance;
