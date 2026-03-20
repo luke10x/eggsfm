@@ -467,9 +467,8 @@ struct SoundSystem
     bool startLive() {
         if(running) teardown();
         lastError.clear();
-        // Reset player — this clears any existing cache
-        player.reset();
-        cachedRate = 0;
+        // reset_keep_cache preserves any recorded cache and capture progress
+        player.reset_keep_cache();
         player.set_sample_rate(sampleRate);
         player.set_chip_type(chipType);
         player.set_build_cache(false);

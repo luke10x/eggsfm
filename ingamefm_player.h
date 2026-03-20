@@ -400,7 +400,33 @@ public:
     // Prefer set_build_cache() / set_play_cache() for finer control.
     bool use_cache_ = false;
 
-    // reset() — clears all songs, SFX definitions, patches, and chip state.
+    // reset_keep_cache() — like reset() but preserves song_cache_, sfx_cache_,
+    // and all capture progress state. Use when restarting live playback without
+    // invalidating a previously recorded cache.
+    void reset_keep_cache() {
+        // Save cache and capture state
+        auto saved_song_cache        = std::move(song_cache_);
+        auto saved_sfx_cache         = std::move(sfx_cache_);
+        bool saved_song_done         = capture_song_done_;
+        bool saved_session           = capture_session_active_;
+        int  saved_voices_cap        = sfx_voices_captured_;
+        int  saved_song_rows         = capture_song_rows_done_.load();
+        auto saved_sfx_rows          = capture_sfx_rows_done_;
+
+        reset();
+
+        // Restore
+        song_cache_                  = std::move(saved_song_cache);
+        sfx_cache_                   = std::move(saved_sfx_cache);
+        capture_song_done_           = saved_song_done;
+        capture_session_active_      = saved_session;
+        sfx_voices_captured_         = saved_voices_cap;
+        capture_song_rows_done_.store(saved_song_rows);
+        capture_sfx_rows_done_       = saved_sfx_rows;
+        // Restore sfx_voices_ to 1 if session was active
+        if(saved_session && saved_voices_cap > 0)
+            sfx_voices_ = 1;
+    }
     // Call after teardown() to prepare the player for a fresh init().
     // Does NOT close the SDL audio device — do that before calling reset().
     void reset() {
