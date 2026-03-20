@@ -23,7 +23,7 @@ em++ -std=c++17 -O2 \
     -s ALLOW_MEMORY_GROWTH=1 \
     -s ASYNCIFY \
     -s ASSERTIONS \
-    --shell-file shell4.html \
+    --shell-file shell.html \
     -o demo7/index.html
     
 (cd demo7 && python3 -mhttp.server)

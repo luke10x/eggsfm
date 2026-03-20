@@ -294,18 +294,23 @@ public:
         if(sfx_voices_==0||!ym_sfx_) return;
         const SfxDef& def = sfx_defs_[id];
 
-        // In capture mode (or after song is captured): allocate capture buffer for this SFX
+        // In capture mode: allocate capture buffer with extra tail rows for release envelope,
+        // and force duration to cover all rows + tail
         bool sfx_capturing = capture_session_active_;
         if(sfx_capturing && sfx_cache_.find(id)==sfx_cache_.end()) {
+            static constexpr int TAIL_ROWS = 4;  // extra rows to capture release tail
+            int total_rows = def.song.num_rows + TAIL_ROWS;
             CachedAudio c;
             c.samples_per_row = def.samples_per_row;
-            c.total_rows      = def.song.num_rows;
-            c.samples.assign(def.song.num_rows * def.samples_per_row * 2, 0);
+            c.total_rows      = total_rows;
+            c.samples.assign(total_rows * def.samples_per_row * 2, 0);
             c.valid = true;
             sfx_cache_[id] = std::move(c);
             capture_sfx_rows_done_[id] = 0;
-            std::printf("[IngameFM] SFX %d capture buffer allocated: %d rows x %d spr\n",
-                        id, def.song.num_rows, def.samples_per_row);
+            std::printf("[IngameFM] SFX %d capture buffer: %d rows (%d pattern + %d tail) x %d spr\n",
+                        id, total_rows, def.song.num_rows, TAIL_ROWS, def.samples_per_row);
+            // duration covers pattern rows + tail so voice keeps generating release
+            duration_ticks = total_rows;
         } else {
             std::printf("[IngameFM] SFX %d sfx_play: session=%d cache_exists=%d\n",
                         id, (int)capture_session_active_,
@@ -331,8 +336,19 @@ public:
         vs.last_volume     = 0x7F;
         vs.cache_key_id    = def.cache_key_id;
         sfx_process_row(best_v, 0, true);
-        sfx_commit_keyon(best_v);
-        vs.sample_in_row = KEY_OFF_GAP_SAMPLES;
+        if(capture_session_active_) {
+            // In capture mode: reset chip to silence, commit key-on immediately,
+            // and start writing from sample 0 (no key-off gap pollution).
+            ym_sfx_->reset_chip();
+            sfx_commit_keyon(best_v);
+            vs.sample_in_row = 0;  // write from the very start of row 0
+        } else if(play_cache_||use_cache_) {
+            // Playing from cache: start reading from 0 to match how it was recorded
+            vs.sample_in_row = 0;
+        } else {
+            sfx_commit_keyon(best_v);
+            vs.sample_in_row = KEY_OFF_GAP_SAMPLES;
+        }
     }
 
     static void s_audio_callback(void* userdata, Uint8* stream, int len) {
@@ -832,9 +848,11 @@ private:
         SfxVoiceState& vs=sfx_voice_[v];
         if(!vs.active()) return;
         const SfxDef& def=sfx_defs_[vs.sfx_id];
+        // In capture mode or cache playback, there is no key-off gap — start from 0
+        bool no_gap = capture_session_active_ || play_cache_ || use_cache_;
         int remaining=samples;
         while(remaining>0) {
-            bool in_gap=vs.sample_in_row<KEY_OFF_GAP_SAMPLES;
+            bool in_gap=!no_gap && vs.sample_in_row<KEY_OFF_GAP_SAMPLES;
             int next_bound=in_gap?KEY_OFF_GAP_SAMPLES:vs.samples_per_row;
             int to_advance=std::min(remaining,next_bound-vs.sample_in_row);
             vs.sample_in_row+=to_advance; remaining-=to_advance;
@@ -854,8 +872,9 @@ private:
                 }
                 if(vs.ticks_remaining<=0) { ym_sfx_->key_off(v); vs=SfxVoiceState{}; return; }
                 vs.current_row++;
-                if(vs.current_row>=(int)def.song.rows.size()) vs.current_row=0;
-                sfx_process_row(v,vs.current_row);
+                // During tail (past pattern end): don't process new rows, just let chip ring down
+                if(vs.current_row < (int)def.song.rows.size())
+                    sfx_process_row(v, vs.current_row);
             }
         }
     }

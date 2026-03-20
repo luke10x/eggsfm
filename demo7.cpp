@@ -393,10 +393,10 @@ struct ModImgui
 
 struct SfxInfo { int id; const char* name; const char* pattern; int tick; int speed; int dur; int pri; };
 static const SfxInfo SFX_LIST[] = {
-    { SFX_ID_JUMP,    "JUMP",    SFX_JUMP,    60, 3,  8, 4 },
-    { SFX_ID_COIN,    "COIN",    SFX_COIN,    60, 3,  6, 3 },
-    { SFX_ID_ALARM,   "ALARM",   SFX_ALARM,   60, 3, 10, 5 },
-    { SFX_ID_FANFARE, "FANFARE", SFX_FANFARE, 60, 3, 14, 6 },
+    { SFX_ID_JUMP,    "JUMP",    SFX_JUMP,    60, 3, 10, 4 },  // 6 rows + 4 tail
+    { SFX_ID_COIN,    "COIN",    SFX_COIN,    60, 3,  9, 3 },  // 5 rows + 4 tail
+    { SFX_ID_ALARM,   "ALARM",   SFX_ALARM,   60, 3, 12, 5 },  // 8 rows + 4 tail
+    { SFX_ID_FANFARE, "FANFARE", SFX_FANFARE, 60, 3, 16, 6 },  // 12 rows + 4 tail
 };
 static constexpr int SFX_COUNT = 4;
 
@@ -820,10 +820,10 @@ static void drawPanel(AppState& app)
         ImGui::SeparatorText("Sound Effects");
         struct SfxBtn { int id; int pri; int dur; const char* label; ImVec4 col; };
         static const SfxBtn btns[] = {
-            { SFX_ID_JUMP,    4, 8,"[q] JUMP",    ImVec4(0.2f,0.5f,0.8f,1.f) },
-            { SFX_ID_COIN,    3, 6,"[w] COIN",    ImVec4(0.8f,0.7f,0.1f,1.f) },
-            { SFX_ID_ALARM,   5,10,"[e] ALARM",   ImVec4(0.8f,0.4f,0.1f,1.f) },
-            { SFX_ID_FANFARE, 6,14,"[r] FANFARE", ImVec4(0.6f,0.1f,0.6f,1.f) },
+            { SFX_ID_JUMP,    4,10,"[q] JUMP",    ImVec4(0.2f,0.5f,0.8f,1.f) },
+            { SFX_ID_COIN,    3, 9,"[w] COIN",    ImVec4(0.8f,0.7f,0.1f,1.f) },
+            { SFX_ID_ALARM,   5,12,"[e] ALARM",   ImVec4(0.8f,0.4f,0.1f,1.f) },
+            { SFX_ID_FANFARE, 6,16,"[r] FANFARE", ImVec4(0.6f,0.1f,0.6f,1.f) },
         };
         const float bw=(panelW-40.f)/2.f;
         for(int i=0;i<4;i++) {
