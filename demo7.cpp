@@ -35,6 +35,7 @@
 #include <string>
 
 #include "ingamefm.h"
+#include "ingamefm_patch_editor.h"
 
 // =============================================================================
 // 2. GLSL
@@ -593,6 +594,10 @@ struct AppState
     int  selectedBuf  = 1;   // index into BUFS[]
     int  selectedChip = 0;   // index into CHIPS[]
     bool showError    = false;
+
+    // Patch editors — one per song instrument
+    OPNPatchEditor editors[3];    // [0]=PATCH_00 [1]=PATCH_01 [2]=PATCH_HIHAT
+    bool editorsInited = false;
 };
 
 static AppState g_app;
@@ -814,6 +819,46 @@ static void drawPanel(AppState& app)
             app.sfxVol=sv/100.f; s.player.set_sfx_volume(app.sfxVol);
         }
 
+        // LFO
+        ImGui::Separator();
+        ImGui::SeparatorText("LFO");
+        static const char* LFO_LBLS[]={"Off","3.82Hz","5.33Hz","5.77Hz","6.11Hz","6.60Hz","9.23Hz","46.1Hz","69.2Hz"};
+        {
+            // Music chip LFO
+            bool musicLfoEn = s.player.get_music_lfo_enable();
+            int  musicLfoFr = musicLfoEn ? s.player.get_music_lfo_freq()+1 : 0;
+            ImGui::Text("Song"); ImGui::SameLine(); ImGui::SetNextItemWidth(120.f);
+            if(ImGui::BeginCombo("##musiclfo", LFO_LBLS[musicLfoFr])) {
+                for(int i=0;i<9;i++) {
+                    bool sel=(i==musicLfoFr);
+                    if(ImGui::Selectable(LFO_LBLS[i],sel)) {
+                        SDL_LockAudioDevice(s.dev);
+                        s.player.set_music_lfo(i>0, i>0?i-1:0);
+                        SDL_UnlockAudioDevice(s.dev);
+                    }
+                    if(sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            // SFX chip LFO
+            bool sfxLfoEn = s.player.get_sfx_lfo_enable();
+            int  sfxLfoFr = sfxLfoEn ? s.player.get_sfx_lfo_freq()+1 : 0;
+            ImGui::Text("SFX"); ImGui::SameLine(); ImGui::SetNextItemWidth(120.f);
+            if(ImGui::BeginCombo("##sfxlfo", LFO_LBLS[sfxLfoFr])) {
+                for(int i=0;i<9;i++) {
+                    bool sel=(i==sfxLfoFr);
+                    if(ImGui::Selectable(LFO_LBLS[i],sel)) {
+                        SDL_LockAudioDevice(s.dev);
+                        s.player.set_sfx_lfo(i>0, i>0?i-1:0);
+                        SDL_UnlockAudioDevice(s.dev);
+                    }
+                    if(sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        }
+
         ImGui::Separator();
 
         // SFX buttons
@@ -840,9 +885,64 @@ static void drawPanel(AppState& app)
         }
     }
 
+    // ── Patch editors (not shown in cached mode) ──────────────────────────────
+    bool canEdit = !s.running || s.isLive;
+    if(!canEdit) app.editorsInited = false;
+    if(canEdit) {
+        ImGui::Separator();
+        ImGui::SeparatorText("Patches");
+
+        // Init editors once (or re-init when going back to live from cached)
+        if(!app.editorsInited) {
+            app.editors[0].init("PATCH_00", PATCH_00, false, 0, 0);
+            app.editors[1].init("PATCH_01", PATCH_01, false, 0, 0);
+            app.editors[2].init("PATCH_HIHAT", PATCH_HIHAT, false, 0, 0);
+            app.editorsInited = true;
+        }
+
+        static const char* PATCH_NAMES[] = { "PATCH_00", "PATCH_01", "PATCH_HIHAT" };
+        static const int   PATCH_IDS[]   = { 0x00, 0x01, 0x02 };
+        float edBtnW = (panelW - 40.f) / 3.f;
+
+        for(int i=0;i<3;i++) {
+            if(i>0) ImGui::SameLine();
+            OPNPatchEditor& ed = app.editors[i];
+            // Toggle button — lit when open
+            ImVec4 btnCol = ed.open
+                ? ImVec4(0.3f,0.5f,0.7f,1.f)
+                : ImVec4(0.18f,0.28f,0.38f,1.f);
+            ImGui::PushStyleColor(ImGuiCol_Button,        btnCol);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f,0.6f,0.8f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.5f,0.7f,0.9f,1.f));
+            char btnLbl[32]; snprintf(btnLbl, sizeof(btnLbl), "Edit %s", PATCH_NAMES[i]);
+            if(ImGui::Button(btnLbl, ImVec2(edBtnW, 0))) ed.open = !ed.open;
+            ImGui::PopStyleColor(3);
+        }
+
+        // Draw editor windows — called outside main panel's Begin/End, so we
+        // store a flag and draw them after ImGui::End() below
+    }
+
     ImGui::Separator();
     ImGui::TextDisabled("%.0f fps  %.2f ms", app.displayFps, app.displayMs);
     ImGui::End();
+
+    // ── Patch editor popup windows (drawn outside main panel) ─────────────────
+    if(canEdit) {
+        static const char* PATCH_NAMES[] = { "PATCH_00", "PATCH_01", "PATCH_HIHAT" };
+        static const int   PATCH_IDS[]   = { 0x00, 0x01, 0x02 };
+        for(int i=0;i<3;i++) {
+            OPNPatchEditor& ed = app.editors[i];
+            char wndTitle[64]; snprintf(wndTitle, sizeof(wndTitle), "OPN Editor — %s###opned%d", PATCH_NAMES[i], i);
+            if(ed.drawWindow(wndTitle, ImVec2(500, 640))) {
+                if(s.running && s.isLive) {
+                    SDL_LockAudioDevice(s.dev);
+                    s.player.add_patch(PATCH_IDS[i], ed.patch, ed.block, ed.lfoEnable, (uint8_t)ed.lfoFreq);
+                    SDL_UnlockAudioDevice(s.dev);
+                }
+            }
+        }
+    }
 }
 // =============================================================================
 // 12. MAIN TICK

@@ -158,6 +158,24 @@ public:
         patches_present_[instrument_id]=true;
     }
 
+    // Global chip LFO — written directly to register 0x22 of each chip.
+    // Overrides per-patch lfo settings. Call any time (locks not needed if
+    // called from audio callback, or lock device before calling from main thread).
+    void set_music_lfo(bool enable, int freq=0) {
+        music_lfo_enable_ = enable;
+        music_lfo_freq_   = freq & 7;
+        if(ym_music_) ym_music_->enable_lfo(enable, (uint8_t)music_lfo_freq_);
+    }
+    void set_sfx_lfo(bool enable, int freq=0) {
+        sfx_lfo_enable_ = enable;
+        sfx_lfo_freq_   = freq & 7;
+        if(ym_sfx_) ym_sfx_->enable_lfo(enable, (uint8_t)sfx_lfo_freq_);
+    }
+    bool get_music_lfo_enable() const { return music_lfo_enable_; }
+    int  get_music_lfo_freq()   const { return music_lfo_freq_; }
+    bool get_sfx_lfo_enable()   const { return sfx_lfo_enable_; }
+    int  get_sfx_lfo_freq()     const { return sfx_lfo_freq_; }
+
     // ── Song definition ──────────────────────────────────────────────────────
     void song_define(int id, const std::string& text, int tick_rate, int speed) {
         if(tick_rate<=0) throw std::runtime_error("tick_rate must be > 0");
@@ -463,6 +481,8 @@ public:
         current_song_id_=-1;
         music_vol_.store(1.0f); sfx_vol_.store(1.0f);
         build_cache_=false; play_cache_=false; use_cache_=false;
+        // Note: music_lfo_enable_, music_lfo_freq_, sfx_lfo_enable_, sfx_lfo_freq_
+        // are intentionally NOT reset here — only set_music_lfo()/set_sfx_lfo() change them.
         capture_mode_=false; capture_pending_=false; capture_song_done_=false;
         capture_session_active_=false; sfx_voices_captured_=0;
         capture_song_rows_done_.store(0);
@@ -594,6 +614,8 @@ private:
 
     int sample_rate_ = 44100;
     IngameFMChipType chip_type_ = IngameFMChipType::YM3438;
+    bool music_lfo_enable_ = false; int music_lfo_freq_ = 0;
+    bool sfx_lfo_enable_   = false; int sfx_lfo_freq_   = 0;
 
     // ── Live capture state ────────────────────────────────────────────────────
     bool capture_pending_        = false;  // waiting for next loop boundary
@@ -622,6 +644,8 @@ private:
         ym_sfx_  =std::make_unique<IngameFMChip>();
         ym_music_->set_chip_type(chip_type_);
         ym_sfx_->set_chip_type(chip_type_);
+        ym_music_->enable_lfo(music_lfo_enable_, (uint8_t)music_lfo_freq_);
+        ym_sfx_->enable_lfo(sfx_lfo_enable_,   (uint8_t)sfx_lfo_freq_);
         init_panning();
     }
 
@@ -795,8 +819,7 @@ private:
                 block = pe.block;
                 YM2612Patch p = apply_volume(pe.patch, pending_[ch].volume);
                 ym_music_->load_patch(p, ch);
-                ym_music_->enable_lfo(pe.lfo_enable != 0,
-                                      static_cast<uint8_t>(pe.lfo_freq));
+                ym_music_->enable_lfo(music_lfo_enable_, (uint8_t)music_lfo_freq_);
             }
             ym_music_->set_frequency(ch,
                 IngameFMChip::midi_to_hz(pending_[ch].midi_note),
@@ -834,8 +857,7 @@ private:
             block = pe.block;
             YM2612Patch p = apply_volume(pe.patch, vs.pending_vol);
             ym_sfx_->load_patch(p, v);
-            ym_sfx_->enable_lfo(pe.lfo_enable != 0,
-                                 static_cast<uint8_t>(pe.lfo_freq));
+            ym_sfx_->enable_lfo(sfx_lfo_enable_, (uint8_t)sfx_lfo_freq_);
         }
         ym_sfx_->set_frequency(v,
             IngameFMChip::midi_to_hz(vs.pending_note),
