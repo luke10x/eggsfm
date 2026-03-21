@@ -628,305 +628,316 @@ static void drawPanel(AppState& app)
         ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize|
         ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoScrollbar);
 
-    SoundSystem& s = app.sound;
-    bool isCapturing = s.isCaching();
+    SoundSystem& s   = app.sound;
+    const bool running   = s.running;
+    const bool isLive    = running && s.isLive;
+    const bool isCached  = running && !s.isLive;
+    const bool stopped   = !running;
+    const bool capPend   = s.isCapturePending();
+    const bool capActive = s.isCaching();
+    const bool allCached = s.allCached();
 
-    // ── Settings ─────────────────────────────────────────────────────────────
-    ImGui::SeparatorText("Settings");
-    ImGui::BeginDisabled(s.running);
-    ImGui::Text("Rate"); ImGui::SameLine(); ImGui::SetNextItemWidth(108.f);
-    if(ImGui::BeginCombo("##rate", RATE_LBLS[app.selectedRate])) {
-        for(int i=0;i<4;i++) {
-            bool sel=(i==app.selectedRate);
-            if(ImGui::Selectable(RATE_LBLS[i],sel)) app.selectedRate=i;
-            if(sel) ImGui::SetItemDefaultFocus();
+    static const char* LFO_LBLS[] = {"Off","3.82 Hz","5.33 Hz","5.77 Hz",
+                                      "6.11 Hz","6.60 Hz","9.23 Hz","46.1 Hz","69.2 Hz"};
+
+    // =========================================================================
+    // SECTION 1 — HARDWARE
+    // Chip, sample rate, buffer size. Locked while engine is running.
+    // =========================================================================
+    ImGui::SeparatorText("Hardware");
+    ImGui::BeginDisabled(running);
+    {
+        ImGui::Text("Chip"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1.f);
+        if(ImGui::BeginCombo("##chip", CHIP_LBLS[app.selectedChip])) {
+            for(int i=0;i<2;i++) {
+                bool sel=(i==app.selectedChip);
+                if(ImGui::Selectable(CHIP_LBLS[i],sel)) app.selectedChip=i;
+                if(sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
         }
-        ImGui::EndCombo();
-    }
-    ImGui::SameLine(); ImGui::Text("Buf"); ImGui::SameLine(); ImGui::SetNextItemWidth(68.f);
-    if(ImGui::BeginCombo("##buf", BUF_LBLS[app.selectedBuf])) {
-        for(int i=0;i<4;i++) {
-            bool sel=(i==app.selectedBuf);
-            if(ImGui::Selectable(BUF_LBLS[i],sel)) app.selectedBuf=i;
-            if(sel) ImGui::SetItemDefaultFocus();
+        ImGui::Text("Sample rate"); ImGui::SameLine(); ImGui::SetNextItemWidth(110.f);
+        if(ImGui::BeginCombo("##rate", RATE_LBLS[app.selectedRate])) {
+            for(int i=0;i<4;i++) {
+                bool sel=(i==app.selectedRate);
+                if(ImGui::Selectable(RATE_LBLS[i],sel)) app.selectedRate=i;
+                if(sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
         }
-        ImGui::EndCombo();
-    }
-    ImGui::Spacing();
-    ImGui::Text("Chip"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1.f);
-    if(ImGui::BeginCombo("##chip", CHIP_LBLS[app.selectedChip])) {
-        for(int i=0;i<2;i++) {
-            bool sel=(i==app.selectedChip);
-            if(ImGui::Selectable(CHIP_LBLS[i],sel)) app.selectedChip=i;
-            if(sel) ImGui::SetItemDefaultFocus();
+        ImGui::SameLine(); ImGui::Text("Buffer"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1.f);
+        if(ImGui::BeginCombo("##buf", BUF_LBLS[app.selectedBuf])) {
+            for(int i=0;i<4;i++) {
+                bool sel=(i==app.selectedBuf);
+                if(ImGui::Selectable(BUF_LBLS[i],sel)) app.selectedBuf=i;
+                if(sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
         }
-        ImGui::EndCombo();
     }
     ImGui::EndDisabled();
 
-    // ── Cache progress (always visible) ──────────────────────────────────────
-    ImGui::SeparatorText("Cache");
-    {
-        // Song bar
-        int songDone  = s.songRowsDone();
-        int songTotal = s.songRowsTotal();
-        bool songOk   = s.songCached();
-        bool capPend  = s.isCapturePending();
-        bool capActive = s.isCaching();
-        float frac    = (songTotal>0) ? (float)songDone/songTotal : 0.f;
-        char  overlay[64];
-        const char* songStatus = songOk ? "done" : (capActive ? "recording..." : (capPend ? "pending..." : ""));
-        snprintf(overlay, sizeof(overlay), "Song  %d/%d  %s", songDone, songTotal>0?songTotal:0, songStatus);
-        ImVec4 songCol = songOk ? ImVec4(0.2f,0.7f,0.2f,1.f)
-                       : (capPend ? ImVec4(0.35f,0.35f,0.35f,1.f)
-                       : ImVec4(0.5f,0.45f,0.1f,1.f));
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, songCol);
-        ImGui::ProgressBar(frac, ImVec2(-1,0), overlay);
-        ImGui::PopStyleColor();
+    // =========================================================================
+    // SECTION 2 — PLAYBACK MODE
+    // Shows current engine state; start/stop controls.
+    // =========================================================================
+    ImGui::SeparatorText("Playback");
+    ImGui::Spacing();
 
-        // SFX bars
-        for(auto& info : SFX_LIST) {
-            int done  = s.sfxRowsDone(info.id);
-            int total = s.sfxRowsTotal(info.id);
-            bool ok   = s.sfxCached(info.id);
-            float f2  = (total>0) ? (float)done/total : 0.f;
-            const char* sfxStatus = ok ? "done" : (s.isCaptureSession() ? "play to record" : (capPend ? "pending..." : ""));
-            snprintf(overlay, sizeof(overlay), "SFX %s  %d/%d  %s", info.name, done, total>0?total:0, sfxStatus);
-            ImVec4 sfxCol = ok ? ImVec4(0.2f,0.7f,0.2f,1.f)
-                          : ((capPend || (s.isCaptureSession() && !ok)) ? ImVec4(0.35f,0.35f,0.35f,1.f)
-                          : ImVec4(0.5f,0.45f,0.1f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, sfxCol);
-            ImGui::ProgressBar(f2, ImVec2(-1,0), overlay);
-            ImGui::PopStyleColor();
-        }
+    if(stopped) {
+        // ── Stopped ──────────────────────────────────────────────────────────
+        ImGui::TextDisabled("Engine stopped.");
+        ImGui::Spacing();
 
-        if(s.allCached() && s.cachedRate>0)
-            ImGui::TextColored(ImVec4(0.3f,1.f,0.3f,1.f),
-                "All cached at %d Hz", s.cachedRate);
-        else if(s.cachedRate==0 && !s.allCached())
-            ImGui::TextDisabled("Not recorded");
-    }
-
-    // ── Controls ─────────────────────────────────────────────────────────────
-    ImGui::SeparatorText("Controls");
-
-    if(!s.running) {
-        if(ImGui::Button("Start Live", ImVec2(-1,0))) {
+        // Live Synthesis
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f,0.35f,0.15f,1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f,0.5f, 0.25f,1.f));
+        if(ImGui::Button("Start — Live Synthesis", ImVec2(-1,0))) {
             s.sampleRate   = RATES[app.selectedRate];
             s.bufferFrames = BUFS[app.selectedBuf];
             s.chipType     = CHIPS[app.selectedChip];
             app.showError  = false;
             if(s.startLive()) {
                 app.musicVol=1.f; app.sfxVol=1.f;
-                s.player.set_music_volume(1.f);
-                s.player.set_sfx_volume(1.f);
+                s.player.set_music_volume(1.f); s.player.set_sfx_volume(1.f);
             } else app.showError=true;
         }
-        // Start Cached — only when cache exists
-        ImGui::BeginDisabled(!s.allCached());
-        char cachedLbl[64] = "Start Cached";
-        if(s.allCached() && s.cachedRate>0)
-            snprintf(cachedLbl,sizeof(cachedLbl),"Start Cached (%d Hz)", s.cachedRate);
-        if(ImGui::Button(cachedLbl, ImVec2(-1,0))) {
-            s.sampleRate   = s.cachedRate;
-            s.bufferFrames = BUFS[app.selectedBuf];
-            s.chipType     = CHIPS[app.selectedChip];
-            app.showError  = false;
-            for(int i=0;i<4;i++) if(RATES[i]==s.cachedRate){app.selectedRate=i;break;}
-            if(!s.startCached()) app.showError=true;
-            else {
-                app.musicVol=1.f; app.sfxVol=1.f;
-                s.player.set_music_volume(1.f);
-                s.player.set_sfx_volume(1.f);
+        ImGui::PopStyleColor(2);
+
+        // Cached Playback — only when cache exists
+        {
+            ImGui::BeginDisabled(!allCached);
+            char lbl[64];
+            if(allCached && s.cachedRate>0)
+                snprintf(lbl,sizeof(lbl),"Start — Cached Playback  (%d Hz)", s.cachedRate);
+            else
+                snprintf(lbl,sizeof(lbl),"Start — Cached Playback  (no cache)");
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.1f,0.25f,0.4f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f,0.4f, 0.6f,1.f));
+            if(ImGui::Button(lbl, ImVec2(-1,0))) {
+                s.sampleRate   = s.cachedRate;
+                s.bufferFrames = BUFS[app.selectedBuf];
+                s.chipType     = CHIPS[app.selectedChip];
+                app.showError  = false;
+                for(int i=0;i<4;i++) if(RATES[i]==s.cachedRate){app.selectedRate=i;break;}
+                if(!s.startCached()) app.showError=true;
+                else {
+                    app.musicVol=1.f; app.sfxVol=1.f;
+                    s.player.set_music_volume(1.f); s.player.set_sfx_volume(1.f);
+                }
+            }
+            ImGui::PopStyleColor(2);
+            ImGui::EndDisabled();
+            if(allCached && s.cachedRate>0 && RATES[app.selectedRate]!=s.cachedRate) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f,0.8f,0.2f,1.f));
+                ImGui::TextWrapped("  Cache recorded at %d Hz — rate will be forced.", s.cachedRate);
+                ImGui::PopStyleColor();
             }
         }
-        ImGui::EndDisabled();
-        // Rate mismatch warning
-        if(s.allCached() && s.cachedRate>0 && RATES[app.selectedRate]!=s.cachedRate) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f,0.75f,0.1f,1.f));
-            ImGui::TextWrapped("Note: cached at %d Hz — rate will be forced to match.", s.cachedRate);
-            ImGui::PopStyleColor();
-        }
+
         if(app.showError && !s.lastError.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f,0.3f,0.3f,1.f));
             ImGui::TextWrapped("%s", s.lastError.c_str());
             ImGui::PopStyleColor();
         }
+
     } else {
         // ── Running ───────────────────────────────────────────────────────────
-        if(s.isLive)
-            ImGui::TextColored(ImVec4(0.9f,0.7f,0.2f,1.f),"LIVE  sr=%d  buf=%d  row %d/%d",
-                s.sampleRate,s.bufferFrames,
-                s.player.get_current_row(),s.player.get_song_length());
-        else
-            ImGui::TextColored(ImVec4(0.3f,1.f,0.3f,1.f),"CACHED  sr=%d  buf=%d  row %d/%d",
-                s.sampleRate,s.bufferFrames,
-                s.player.get_current_row(),s.player.get_song_length());
-        ImGui::TextDisabled("%s", CHIP_LBLS[app.selectedChip]);
-
+        // Mode badge
+        if(isLive) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f,0.75f,0.2f,1.f));
+            ImGui::Text("●  LIVE SYNTHESIS");
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f,0.9f,0.4f,1.f));
+            ImGui::Text("●  CACHED PLAYBACK");
+            ImGui::PopStyleColor();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s  %d Hz  buf %d  row %d/%d",
+            CHIP_LBLS[app.selectedChip],
+            s.sampleRate, s.bufferFrames,
+            s.player.get_current_row(), s.player.get_song_length());
         ImGui::Spacing();
 
-        // Record / Cancel / Clear buttons — only in live mode
-        if(s.isLive) {
-            if(!s.allCached()) {
-                // Not fully cached yet — show Record / Cancel Record
-                bool isPending = s.isCapturePending();
-                if(!isCapturing && !isPending) {
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.5f,0.15f,0.0f,1.f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f,0.3f, 0.0f,1.f));
-                    if(ImGui::Button("Record Cache", ImVec2(-1,0)))
-                        s.startCapture();
-                    ImGui::PopStyleColor(2);
-                } else {
-                    // Pending or active — show cancel
-                    const char* lbl = isPending ? "Cancel (waiting for loop end...)" : "Cancel Recording";
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.5f,0.0f,0.0f,1.f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f,0.1f,0.1f,1.f));
-                    if(ImGui::Button(lbl, ImVec2(-1,0)))
-                        s.cancelCapture();
-                    ImGui::PopStyleColor(2);
-                }
+        // Stop button
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.4f,0.08f,0.08f,1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f,0.12f,0.12f,1.f));
+        if(ImGui::Button("Stop Engine", ImVec2(-1,0))) s.teardown();
+        ImGui::PopStyleColor(2);
+    }
+
+    // =========================================================================
+    // SECTION 3 — CACHE
+    // Always visible. Shows recording progress for song and each SFX.
+    // Record button only available in Live Synthesis mode.
+    // =========================================================================
+    ImGui::SeparatorText("Cache");
+
+    // Progress bars
+    {
+        char overlay[72];
+        // Song
+        {
+            int done=s.songRowsDone(), total=s.songRowsTotal();
+            bool ok=s.songCached();
+            float frac=(total>0)?(float)done/total:0.f;
+            const char* status = ok?"done":capActive?"recording...":capPend?"waiting...":"";
+            snprintf(overlay,sizeof(overlay),"Song  %d/%d  %s",done,total>0?total:0,status);
+            ImVec4 col = ok?ImVec4(0.2f,0.7f,0.2f,1.f):capPend?ImVec4(0.35f,0.35f,0.35f,1.f):ImVec4(0.45f,0.4f,0.1f,1.f);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram,col);
+            ImGui::ProgressBar(frac,ImVec2(-1,0),overlay);
+            ImGui::PopStyleColor();
+        }
+        // SFX
+        bool sessionOn = s.isCaptureSession();
+        for(auto& info:SFX_LIST) {
+            int done=s.sfxRowsDone(info.id),total=s.sfxRowsTotal(info.id);
+            bool ok=s.sfxCached(info.id);
+            float frac=(total>0)?(float)done/total:0.f;
+            const char* status=ok?"done":sessionOn?"trigger to record":capPend?"waiting...":"";
+            snprintf(overlay,sizeof(overlay),"%-8s  %d/%d  %s",info.name,done,total>0?total:0,status);
+            ImVec4 col=ok?ImVec4(0.2f,0.7f,0.2f,1.f):(capPend||(sessionOn&&!ok))?ImVec4(0.35f,0.35f,0.35f,1.f):ImVec4(0.45f,0.4f,0.1f,1.f);
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram,col);
+            ImGui::ProgressBar(frac,ImVec2(-1,0),overlay);
+            ImGui::PopStyleColor();
+        }
+        if(allCached && s.cachedRate>0)
+            ImGui::TextColored(ImVec4(0.3f,1.f,0.3f,1.f),"Cache complete  —  %d Hz", s.cachedRate);
+        else if(!allCached && !sessionOn && !capPend)
+            ImGui::TextDisabled("No cache recorded");
+    }
+
+    // Record / Stop recording / Re-record — only in Live mode
+    if(isLive) {
+        ImGui::Spacing();
+        if(!allCached) {
+            bool isPending=s.isCapturePending();
+            if(!capActive && !isPending) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.45f,0.15f,0.0f,1.f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.65f,0.28f,0.0f,1.f));
+                if(ImGui::Button("Record Cache", ImVec2(-1,0))) s.startCapture();
+                ImGui::PopStyleColor(2);
             } else {
-                // Fully cached — offer re-record (which resets cache)
-                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.2f,0.2f,0.2f,1.f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f,0.35f,0.35f,1.f));
-                if(ImGui::Button("Re-record Cache (resets)", ImVec2(-1,0))) {
-                    s.cachedRate = 0;
-                    s.startCapture();  // request_capture at next loop
-                }
+                const char* lbl=isPending?"Stop Recording  (waiting for next loop...)":"Stop Recording";
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.5f,0.05f,0.05f,1.f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.7f,0.1f, 0.1f,1.f));
+                if(ImGui::Button(lbl, ImVec2(-1,0))) s.cancelCapture();
                 ImGui::PopStyleColor(2);
             }
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.22f,0.22f,0.22f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f,0.35f,0.35f,1.f));
+            if(ImGui::Button("Re-record Cache", ImVec2(-1,0))) {
+                s.cachedRate=0; s.startCapture();
+            }
+            ImGui::PopStyleColor(2);
         }
+    }
 
-        // Teardown
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.45f,0.08f,0.08f,1.f));
-        if(ImGui::Button("Teardown", ImVec2(-1,0))) s.teardown();
-        ImGui::PopStyleColor();
-
-        ImGui::Separator();
+    // =========================================================================
+    // SECTION 4 — MIXER  (only while running)
+    // Volume sliders + LFO for both chips.
+    // =========================================================================
+    if(running) {
+        ImGui::SeparatorText("Mixer");
 
         // Volume
-        ImGui::SeparatorText("Volume");
+        ImGui::Text("Volume"); ImGui::SameLine();
         int mv=(int)(app.musicVol*100.f+0.5f);
-        ImGui::SetNextItemWidth(160.f);
-        if(ImGui::SliderInt("Music##vol",&mv,0,100,"%d%%")) {
+        ImGui::SetNextItemWidth(130.f);
+        if(ImGui::SliderInt("Song##vol",&mv,0,100,"%d%%")) {
             app.musicVol=mv/100.f; s.player.set_music_volume(app.musicVol);
         }
         ImGui::SameLine();
         int sv=(int)(app.sfxVol*100.f+0.5f);
-        ImGui::SetNextItemWidth(160.f);
+        ImGui::SetNextItemWidth(130.f);
         if(ImGui::SliderInt("SFX##vol",&sv,0,100,"%d%%")) {
             app.sfxVol=sv/100.f; s.player.set_sfx_volume(app.sfxVol);
         }
 
         // LFO
-        ImGui::Separator();
-        ImGui::SeparatorText("LFO");
-        static const char* LFO_LBLS[]={"Off","3.82Hz","5.33Hz","5.77Hz","6.11Hz","6.60Hz","9.23Hz","46.1Hz","69.2Hz"};
+        ImGui::Text("LFO"); ImGui::SameLine();
         {
-            // Music chip LFO
-            bool musicLfoEn = s.player.get_music_lfo_enable();
-            int  musicLfoFr = musicLfoEn ? s.player.get_music_lfo_freq()+1 : 0;
-            ImGui::Text("Song"); ImGui::SameLine(); ImGui::SetNextItemWidth(120.f);
-            if(ImGui::BeginCombo("##musiclfo", LFO_LBLS[musicLfoFr])) {
-                for(int i=0;i<9;i++) {
-                    bool sel=(i==musicLfoFr);
-                    if(ImGui::Selectable(LFO_LBLS[i],sel)) {
-                        SDL_LockAudioDevice(s.dev);
-                        s.player.set_music_lfo(i>0, i>0?i-1:0);
-                        SDL_UnlockAudioDevice(s.dev);
-                    }
-                    if(sel) ImGui::SetItemDefaultFocus();
-                }
+            bool en=s.player.get_music_lfo_enable();
+            int  fr=en?s.player.get_music_lfo_freq()+1:0;
+            ImGui::Text("Song"); ImGui::SameLine(); ImGui::SetNextItemWidth(90.f);
+            if(ImGui::BeginCombo("##mlfo",LFO_LBLS[fr])) {
+                for(int i=0;i<9;i++){bool sel=(i==fr);if(ImGui::Selectable(LFO_LBLS[i],sel)){SDL_LockAudioDevice(s.dev);s.player.set_music_lfo(i>0,i>0?i-1:0);SDL_UnlockAudioDevice(s.dev);}if(sel)ImGui::SetItemDefaultFocus();}
                 ImGui::EndCombo();
             }
-            ImGui::SameLine();
-            // SFX chip LFO
-            bool sfxLfoEn = s.player.get_sfx_lfo_enable();
-            int  sfxLfoFr = sfxLfoEn ? s.player.get_sfx_lfo_freq()+1 : 0;
-            ImGui::Text("SFX"); ImGui::SameLine(); ImGui::SetNextItemWidth(120.f);
-            if(ImGui::BeginCombo("##sfxlfo", LFO_LBLS[sfxLfoFr])) {
-                for(int i=0;i<9;i++) {
-                    bool sel=(i==sfxLfoFr);
-                    if(ImGui::Selectable(LFO_LBLS[i],sel)) {
-                        SDL_LockAudioDevice(s.dev);
-                        s.player.set_sfx_lfo(i>0, i>0?i-1:0);
-                        SDL_UnlockAudioDevice(s.dev);
-                    }
-                    if(sel) ImGui::SetItemDefaultFocus();
-                }
+        }
+        ImGui::SameLine();
+        {
+            bool en=s.player.get_sfx_lfo_enable();
+            int  fr=en?s.player.get_sfx_lfo_freq()+1:0;
+            ImGui::Text("SFX"); ImGui::SameLine(); ImGui::SetNextItemWidth(90.f);
+            if(ImGui::BeginCombo("##slfo",LFO_LBLS[fr])) {
+                for(int i=0;i<9;i++){bool sel=(i==fr);if(ImGui::Selectable(LFO_LBLS[i],sel)){SDL_LockAudioDevice(s.dev);s.player.set_sfx_lfo(i>0,i>0?i-1:0);SDL_UnlockAudioDevice(s.dev);}if(sel)ImGui::SetItemDefaultFocus();}
                 ImGui::EndCombo();
             }
         }
 
-        ImGui::Separator();
-
-        // SFX buttons
+        // =========================================================================
+        // SECTION 5 — SOUND EFFECTS  (only while running)
+        // =========================================================================
         ImGui::SeparatorText("Sound Effects");
-        struct SfxBtn { int id; int pri; int dur; const char* label; ImVec4 col; };
-        static const SfxBtn btns[] = {
-            { SFX_ID_JUMP,    4,10,"[q] JUMP",    ImVec4(0.2f,0.5f,0.8f,1.f) },
-            { SFX_ID_COIN,    3, 9,"[w] COIN",    ImVec4(0.8f,0.7f,0.1f,1.f) },
-            { SFX_ID_ALARM,   5,12,"[e] ALARM",   ImVec4(0.8f,0.4f,0.1f,1.f) },
-            { SFX_ID_FANFARE, 6,16,"[r] FANFARE", ImVec4(0.6f,0.1f,0.6f,1.f) },
+        struct SfxBtn{int id;int pri;int dur;const char* label;ImVec4 col;};
+        static const SfxBtn btns[]={
+            {SFX_ID_JUMP,   4,10,"[q] JUMP",   ImVec4(0.2f,0.5f,0.8f,1.f)},
+            {SFX_ID_COIN,   3, 9,"[w] COIN",   ImVec4(0.8f,0.7f,0.1f,1.f)},
+            {SFX_ID_ALARM,  5,12,"[e] ALARM",  ImVec4(0.8f,0.4f,0.1f,1.f)},
+            {SFX_ID_FANFARE,6,16,"[r] FANFARE",ImVec4(0.6f,0.1f,0.6f,1.f)},
         };
         const float bw=(panelW-40.f)/2.f;
-        for(int i=0;i<4;i++) {
-            if(i%2!=0) ImGui::SameLine();
+        for(int i=0;i<4;i++){
+            if(i%2!=0)ImGui::SameLine();
             const SfxBtn& b=btns[i];
-            ImVec4 dim(b.col.x*0.35f,b.col.y*0.35f,b.col.z*0.35f,0.9f);
-            ImVec4 hov(b.col.x*0.6f, b.col.y*0.6f, b.col.z*0.6f, 1.0f);
-            ImGui::PushStyleColor(ImGuiCol_Button,        dim);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hov);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  b.col);
-            if(ImGui::Button(b.label, ImVec2(bw,36.f)))
-                s.sfx_play(b.id,b.pri,b.dur);
+            ImVec4 dim(b.col.x*.35f,b.col.y*.35f,b.col.z*.35f,.9f);
+            ImVec4 hov(b.col.x*.6f, b.col.y*.6f, b.col.z*.6f,1.f);
+            ImGui::PushStyleColor(ImGuiCol_Button,dim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,hov);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,b.col);
+            if(ImGui::Button(b.label,ImVec2(bw,36.f)))s.sfx_play(b.id,b.pri,b.dur);
             ImGui::PopStyleColor(3);
         }
     }
 
-    // ── Patch editors (not shown in cached mode) ──────────────────────────────
-    bool canEdit = !s.running || s.isLive;
+    // =========================================================================
+    // SECTION 6 — INSTRUMENTS  (hidden in Cached Playback mode)
+    // Patch editors open as floating windows.
+    // =========================================================================
+    bool canEdit = stopped || isLive;
     if(!canEdit) app.editorsInited = false;
     if(canEdit) {
-        ImGui::Separator();
-        ImGui::SeparatorText("Patches");
-
-        // Init editors once (or re-init when going back to live from cached)
+        ImGui::SeparatorText("Instruments");
         if(!app.editorsInited) {
-            app.editors[0].init("PATCH_00", PATCH_00, false, 0, 0);
-            app.editors[1].init("PATCH_01", PATCH_01, false, 0, 0);
-            app.editors[2].init("PATCH_HIHAT", PATCH_HIHAT, false, 0, 0);
-            app.editorsInited = true;
+            app.editors[0].init("PATCH_00",   PATCH_00,   false,0,0);
+            app.editors[1].init("PATCH_01",   PATCH_01,   false,0,0);
+            app.editors[2].init("PATCH_HIHAT",PATCH_HIHAT,false,0,0);
+            app.editorsInited=true;
         }
-
-        static const char* PATCH_NAMES[] = { "PATCH_00", "PATCH_01", "PATCH_HIHAT" };
-        static const int   PATCH_IDS[]   = { 0x00, 0x01, 0x02 };
-        float edBtnW = (panelW - 40.f) / 3.f;
-
-        for(int i=0;i<3;i++) {
-            if(i>0) ImGui::SameLine();
-            OPNPatchEditor& ed = app.editors[i];
-            // Toggle button — lit when open
-            ImVec4 btnCol = ed.open
-                ? ImVec4(0.3f,0.5f,0.7f,1.f)
-                : ImVec4(0.18f,0.28f,0.38f,1.f);
-            ImGui::PushStyleColor(ImGuiCol_Button,        btnCol);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f,0.6f,0.8f,1.f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.5f,0.7f,0.9f,1.f));
-            char btnLbl[32]; snprintf(btnLbl, sizeof(btnLbl), "Edit %s", PATCH_NAMES[i]);
-            if(ImGui::Button(btnLbl, ImVec2(edBtnW, 0))) ed.open = !ed.open;
+        static const char* PATCH_NAMES[]={"PATCH_00","PATCH_01","PATCH_HIHAT"};
+        static const int   PATCH_IDS[]  ={0x00,0x01,0x02};
+        float edBtnW=(panelW-40.f)/3.f;
+        for(int i=0;i<3;i++){
+            if(i>0)ImGui::SameLine();
+            OPNPatchEditor& ed=app.editors[i];
+            ImVec4 c=ed.open?ImVec4(0.3f,0.5f,0.7f,1.f):ImVec4(0.18f,0.28f,0.38f,1.f);
+            ImGui::PushStyleColor(ImGuiCol_Button,c);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,ImVec4(0.4f,0.6f,0.8f,1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f,0.7f,0.9f,1.f));
+            char lbl[32];snprintf(lbl,sizeof(lbl),"Edit %s",PATCH_NAMES[i]);
+            if(ImGui::Button(lbl,ImVec2(edBtnW,0)))ed.open=!ed.open;
             ImGui::PopStyleColor(3);
         }
-
-        // Draw editor windows — called outside main panel's Begin/End, so we
-        // store a flag and draw them after ImGui::End() below
+        (void)PATCH_IDS; // used in popup section below
     }
 
+    // ── Footer ────────────────────────────────────────────────────────────────
     ImGui::Separator();
     ImGui::TextDisabled("%.0f fps  %.2f ms", app.displayFps, app.displayMs);
     ImGui::End();
-
     // ── Patch editor popup windows (drawn outside main panel) ─────────────────
     if(canEdit) {
         static const char* PATCH_NAMES[] = { "PATCH_00", "PATCH_01", "PATCH_HIHAT" };
