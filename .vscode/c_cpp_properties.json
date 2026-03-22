@@ -1,0 +1,31 @@
+{
+    "configurations": [
+        {
+            "name": "Mac",
+            "includePath": [
+                "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include",
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/../bowling/3rdparty/SDL/include",
+                "${workspaceFolder}/../clay/",
+                "${workspaceFolder}/../bowling/build/_deps/stb-src/",
+                "${workspaceFolder}/../bowling/build/_deps/stb-src/",
+                "${workspaceFolder}/../my-ym2612-plugin/build/_deps/ymfm-src/src/",
+                "${workspaceFolder}/../angle/include/",
+                "~/.local/vortex_deps/assimp-build/installed/native/include"
+            ],
+            "defines": [
+                "_HOT_RUNTIME=0",
+                "JPH_EXTERNAL_PROFILE=1",
+                "JPH_PROFILE_ENABLED=1"
+            ],
+            "macFrameworkPath": [
+                "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks"
+            ],
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "macos-clang-arm64",
+            "configurationProvider": "ms-vscode.makefile-tools"
+        }
+    ],
+    "version": 4
+}

@@ -92,6 +92,63 @@ static constexpr fm_patch_opn PATCH_CLANG =
     }
 };
 
+// =============================================================================
+// SFX PATTERNS (from demo7)
+// tick_rate=60, speed=3 → 50ms per row
+// =============================================================================
+
+// JUMP — rising three-note sweep, snappy
+static const char* SFX_JUMP =
+"6\n"
+"C-4007F\n"
+"E-4007F\n"
+"G-4007F\n"
+"C-5007F\n"
+"OFF....\n"
+".......\n";
+
+// COIN — bright high two-note ping
+static const char* SFX_COIN =
+"5\n"
+"E-5017F\n"
+"A-5017F\n"
+"E-6017F\n"
+"OFF....\n"
+".......\n";
+
+// ALARM — urgent repeating two-tone pulse
+static const char* SFX_ALARM =
+"8\n"
+"A-4007F\n"
+"E-4007F\n"
+"A-4007F\n"
+"E-4007F\n"
+"A-4007F\n"
+"E-4007F\n"
+"OFF....\n"
+".......\n";
+
+// FANFARE — triumphant ascending arpeggio with held final note
+static const char* SFX_FANFARE =
+"12\n"
+"C-4017F\n"
+"E-4017F\n"
+"G-4017F\n"
+"C-5017F\n"
+"E-5017F\n"
+"G-5017F\n"
+"C-6017F\n"
+".......\n"
+".......\n"
+".......\n"
+"OFF....\n"
+".......\n";
+
+static constexpr int SFX_ID_JUMP    = 0;
+static constexpr int SFX_ID_COIN    = 1;
+static constexpr int SFX_ID_ALARM   = 2;
+static constexpr int SFX_ID_FANFARE = 3;
+
 // Piano instrument list — name + patch id
 struct PianoInstr { const char* name; int patchId; };
 static const PianoInstr PIANO_INSTRS[] = {
@@ -430,6 +487,12 @@ static bool start_sound_system(AppState& app)
     fm_patch_set(app.sfx_module, 0x21, &PATCH_SNARE, sizeof(PATCH_SNARE), FM_CHIP_YM2612);
     fm_patch_set(app.sfx_module, 0x23, &PATCH_CLANG, sizeof(PATCH_CLANG), FM_CHIP_YM2612);
 
+    // Declare SFX patterns
+    fm_sfx_declare(app.sfx_module, SFX_ID_JUMP,    SFX_JUMP,    60, 3);
+    fm_sfx_declare(app.sfx_module, SFX_ID_COIN,    SFX_COIN,    60, 3);
+    fm_sfx_declare(app.sfx_module, SFX_ID_ALARM,   SFX_ALARM,   60, 3);
+    fm_sfx_declare(app.sfx_module, SFX_ID_FANFARE, SFX_FANFARE, 60, 3);
+
     // Open SDL audio device
     SDL_AudioSpec desired{};
     desired.freq     = app.sample_rate;
@@ -623,7 +686,33 @@ static void drawPanel(AppState& app)
     // SECTION 6 — SOUND EFFECTS
     // =========================================================================
     ImGui::SeparatorText("Sound Effects");
-    ImGui::TextDisabled("SFX system pending...");
+    
+    if (app.sound_running) {
+        struct SfxBtn { int id; int pri; int dur; const char* label; ImVec4 col; };
+        static const SfxBtn btns[] = {
+            { SFX_ID_JUMP,    4, 10, "[Q] JUMP",    ImVec4(0.2f, 0.5f, 0.8f, 1.f) },
+            { SFX_ID_COIN,    3,  9, "[W] COIN",    ImVec4(0.8f, 0.7f, 0.1f, 1.f) },
+            { SFX_ID_ALARM,   5, 12, "[E] ALARM",   ImVec4(0.8f, 0.4f, 0.1f, 1.f) },
+            { SFX_ID_FANFARE, 6, 16, "[R] FANFARE", ImVec4(0.6f, 0.1f, 0.6f, 1.f) },
+        };
+        
+        const float bw = (panelW - 40.f) / 2.f;
+        for (int i = 0; i < 4; i++) {
+            if (i % 2 != 0) ImGui::SameLine();
+            const SfxBtn& b = btns[i];
+            ImVec4 dim(b.col.x * 0.35f, b.col.y * 0.35f, b.col.z * 0.35f, 0.9f);
+            ImVec4 hov(b.col.x * 0.6f, b.col.y * 0.6f, b.col.z * 0.6f, 1.f);
+            ImGui::PushStyleColor(ImGuiCol_Button, dim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hov);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, b.col);
+            if (ImGui::Button(b.label, ImVec2(bw, 36.f))) {
+                fm_sfx_play(app.sfx_module, b.id, b.pri);
+            }
+            ImGui::PopStyleColor(3);
+        }
+    } else {
+        ImGui::TextDisabled("Start sound system to play SFX.");
+    }
 
     // =========================================================================
     // SECTION 7 — INSTRUMENTS
@@ -817,6 +906,13 @@ static void mainTick()
                 emscripten_cancel_main_loop();
 #endif
             }
+            // SFX hotkeys (Q, W, E, R)
+            if (app.sound_running && app.sfx_module) {
+                if (e.key.keysym.sym == SDLK_q) fm_sfx_play(app.sfx_module, SFX_ID_JUMP, 4);
+                if (e.key.keysym.sym == SDLK_w) fm_sfx_play(app.sfx_module, SFX_ID_COIN, 3);
+                if (e.key.keysym.sym == SDLK_e) fm_sfx_play(app.sfx_module, SFX_ID_ALARM, 5);
+                if (e.key.keysym.sym == SDLK_r) fm_sfx_play(app.sfx_module, SFX_ID_FANFARE, 6);
+            }
             // Piano keys — polyphonic note triggering
             for (int k = 0; k < 12; k++) {
                 if (e.key.keysym.sym == PIANO_KEYS[k]) {
@@ -916,7 +1012,7 @@ int main(int /*argc*/, char** /*argv*/)
     printf("=== ingamefm new_demo ===\n");
     printf("Aurora shader running.\n");
     printf("Click 'Start Sound System' to enable audio.\n");
-    printf("Keys: Z-M = piano  |  Esc = quit\n\n");
+    printf("Keys: Z-M = piano  |  QWER = SFX  |  Esc = quit\n\n");
 
 #ifdef __EMSCRIPTEN__
     emscripten_set_main_loop(mainTick, 0, 1);

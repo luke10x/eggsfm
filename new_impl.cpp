@@ -120,6 +120,41 @@ struct FmVoice {
     int     patch_id;       // current patch
     bool    active;         // voice is sounding
     int     age;            // age counter for voice stealing (higher = older)
+    int     priority;       // priority for SFX stealing (0 = piano, 1-9 = SFX)
+    int     sfx_id;         // SFX ID if playing SFX, -1 otherwise
+};
+
+// Gap samples before key-on (lets previous note's release envelope play)
+static constexpr int KEY_OFF_GAP_SAMPLES = 10;
+
+// SFX pattern event (one row)
+struct FmSfxEvent {
+    int     note;           // MIDI note, -1 = none, -2 = off
+    int     patch_id;       // patch/instrument ID, -1 = inherit
+};
+
+// SFX pattern
+struct FmSfxPattern {
+    int             num_rows;
+    int             tick_rate;
+    int             speed;
+    int             samples_per_row;
+    FmSfxEvent*     rows;     // array of num_rows events
+};
+
+// Active SFX voice tracking
+struct FmActiveSfx {
+    int     sfx_id;         // which SFX is playing
+    int     priority;       // priority level
+    int     voice_idx;      // which voice it's using
+    int     current_row;    // current row in pattern
+    int     sample_in_row;  // current sample within row
+    int     ticks_remaining; // rows remaining (for duration tracking)
+    int     last_patch_id;  // last instrument used
+    bool    pending_has_note; // note waiting to be committed
+    int     pending_note;   // pending MIDI note
+    int     pending_patch_id; // pending patch
+    bool    active;         // is currently playing
 };
 
 struct fm_module {
@@ -141,6 +176,13 @@ struct fm_module {
     // Voice pool (6 voices for OPN)
     FmVoice         voices[6];
     int             voice_age_counter;
+
+    // SFX patterns (up to 256 SFX definitions)
+    FmSfxPattern    sfx_patterns[256];
+    bool            sfx_present[256];
+
+    // Active SFX tracking (up to 6 concurrent SFX, one per voice)
+    FmActiveSfx     active_sfx[6];
 
     // Channel state tracking
     int             current_patch[6];
@@ -201,6 +243,27 @@ fm_module* fm_module_create(int sample_rate, int buffer_frames, fm_chip_type chi
         m->voices[i].patch_id = -1;
         m->voices[i].active = false;
         m->voices[i].age = 0;
+        m->voices[i].priority = 0;
+        m->voices[i].sfx_id = -1;
+    }
+
+    // Initialize SFX patterns
+    std::memset(m->sfx_patterns, 0, sizeof(m->sfx_patterns));
+    std::memset(m->sfx_present, 0, sizeof(m->sfx_present));
+    
+    // Initialize active SFX tracking
+    for (int i = 0; i < 6; i++) {
+        m->active_sfx[i].sfx_id = -1;
+        m->active_sfx[i].priority = 0;
+        m->active_sfx[i].voice_idx = -1;
+        m->active_sfx[i].current_row = 0;
+        m->active_sfx[i].sample_in_row = KEY_OFF_GAP_SAMPLES;
+        m->active_sfx[i].ticks_remaining = 0;
+        m->active_sfx[i].last_patch_id = -1;
+        m->active_sfx[i].pending_has_note = false;
+        m->active_sfx[i].pending_note = -1;
+        m->active_sfx[i].pending_patch_id = -1;
+        m->active_sfx[i].active = false;
     }
 
     return m;
@@ -416,12 +479,353 @@ bool fm_sfx_is_cached(fm_module* m, fm_sfx_id cache_sfx_id)
     return false;
 }
 
+// =============================================================================
+// SFX PATTERN PARSER
+// =============================================================================
+
+static int parse_note_field(const char* nc) {
+    if (nc[0]=='.' && nc[1]=='.' && nc[2]=='.') return -1;  // no note
+    if (nc[0]=='O' && nc[1]=='F' && nc[2]=='F') return -2;  // note off
+    
+    int semitone = -1;
+    switch (nc[0]) {
+        case 'C': semitone = 0;  break;
+        case 'D': semitone = 2;  break;
+        case 'E': semitone = 4;  break;
+        case 'F': semitone = 5;  break;
+        case 'G': semitone = 7;  break;
+        case 'A': semitone = 9;  break;
+        case 'B': semitone = 11; break;
+        default: return -1;
+    }
+    
+    if (nc[1] == '#') semitone++;
+    else if (nc[1] != '-') return -1;
+    
+    if (nc[2] < '0' || nc[2] > '9') return -1;
+    
+    // Furnace octave: C-4 = MIDI 60
+    return 12 + (nc[2] - '0') * 12 + semitone;
+}
+
+static int parse_hex2(const char* p) {
+    if (p[0] == '.' && p[1] == '.') return -1;
+    
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    
+    int h0 = hex(p[0]);
+    int h1 = hex(p[1]);
+    if (h0 < 0 || h1 < 0) return -1;
+    return h0 * 16 + h1;
+}
+
+fm_sfx_id fm_sfx_declare(fm_module* m, fm_sfx_id id, const char* pattern_text, int tick_rate, int speed)
+{
+    if (!m || !pattern_text || tick_rate <= 0 || speed <= 0) return -1;
+    if (id < 0 || id > 255) return -1;
+    
+    // Parse the pattern text (Furnace format, single channel)
+    // First line: number of rows
+    const char* p = pattern_text;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    
+    int num_rows = 0;
+    while (*p >= '0' && *p <= '9') {
+        num_rows = num_rows * 10 + (*p - '0');
+        p++;
+    }
+    
+    if (num_rows <= 0 || num_rows > 256) return -1;
+    
+    // Skip to first row data
+    while (*p && *p != '\n') p++;
+    if (*p == '\n') p++;
+    
+    // Allocate and parse rows
+    FmSfxPattern& pat = m->sfx_patterns[id];
+    pat.num_rows = num_rows;
+    pat.tick_rate = tick_rate;
+    pat.speed = speed;
+    pat.samples_per_row = (int)((double)m->sample_rate / tick_rate * speed);
+    
+    // Free existing rows if any
+    if (pat.rows) {
+        delete[] pat.rows;
+    }
+    pat.rows = new FmSfxEvent[num_rows];
+    
+    int last_note = -1;
+    int last_inst = -1;
+    
+    for (int row = 0; row < num_rows; row++) {
+        FmSfxEvent& ev = pat.rows[row];
+        ev.note = -1;
+        ev.patch_id = -1;
+        
+        if (!*p || *p == '\0') break;
+        
+        // Parse row: "C-4007F" or "......." or "OFF...."
+        // Format: note(3) + inst(2) + vol(2) [+ effects]
+        char note_str[4] = {0};
+        char inst_str[3] = {0};
+        
+        // Copy note (3 chars)
+        for (int i = 0; i < 3 && *p && *p != '|' && *p != '\n'; i++) {
+            note_str[i] = *p++;
+        }
+        // Copy instrument (2 chars)
+        for (int i = 0; i < 2 && *p && *p != '|' && *p != '\n'; i++) {
+            inst_str[i] = *p++;
+        }
+        // Skip rest of channel and move to next line
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+        
+        // Parse note
+        if (note_str[0] && note_str[0] != '.') {
+            ev.note = parse_note_field(note_str);
+            if (ev.note >= 0) last_note = ev.note;
+            else if (ev.note == -2) last_note = -2;  // OFF
+        } else {
+            ev.note = -1;  // inherit
+        }
+        
+        // Parse instrument
+        if (inst_str[0] && inst_str[0] != '.') {
+            ev.patch_id = parse_hex2(inst_str);
+            if (ev.patch_id >= 0) last_inst = ev.patch_id;
+        } else {
+            ev.patch_id = -1;  // inherit
+        }
+        
+        // Resolve inheritance
+        if (ev.note == -1) ev.note = last_note;
+        if (ev.patch_id == -1) ev.patch_id = last_inst;
+    }
+    
+    m->sfx_present[id] = true;
+    return id;
+}
+
+// =============================================================================
+// SFX PLAYBACK WITH VOICE STEALING
+// =============================================================================
+
+// Process a row for an SFX voice (sets up pending note)
+static void sfx_process_row(fm_module* m, int voice_idx, int row_idx)
+{
+    FmActiveSfx& sfx = m->active_sfx[0];  // Find the right slot
+    for (int slot = 0; slot < 6; slot++) {
+        if (m->active_sfx[slot].voice_idx == voice_idx) {
+            sfx = m->active_sfx[slot];
+            break;
+        }
+    }
+    
+    FmSfxPattern& pat = m->sfx_patterns[sfx.sfx_id];
+    if (row_idx >= pat.num_rows) return;
+    
+    FmSfxEvent& ev = pat.rows[row_idx];
+    
+    // Update last known patch
+    if (ev.patch_id >= 0) {
+        sfx.last_patch_id = ev.patch_id;
+    }
+    
+    // Handle note
+    sfx.pending_has_note = false;
+    if (ev.note == -2) {
+        // OFF note - key off
+        m->chip->key_off(voice_idx);
+    } else if (ev.note >= 0) {
+        // New note - prepare for key-on after gap
+        m->chip->key_off(voice_idx);
+        sfx.pending_has_note = true;
+        sfx.pending_note = ev.note;
+        sfx.pending_patch_id = (ev.patch_id >= 0) ? ev.patch_id : sfx.last_patch_id;
+    }
+}
+
+// Commit pending note (after gap samples)
+static void sfx_commit_keyon(fm_module* m, int voice_idx)
+{
+    // Find the active SFX for this voice
+    for (int slot = 0; slot < 6; slot++) {
+        FmActiveSfx& sfx = m->active_sfx[slot];
+        if (!sfx.active || sfx.voice_idx != voice_idx) continue;
+        
+        if (!sfx.pending_has_note) return;
+        if (sfx.pending_patch_id < 0) return;
+        if (!m->patch_present[sfx.pending_patch_id]) return;
+        
+        // Load patch
+        m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
+        m->current_patch[voice_idx] = sfx.pending_patch_id;
+        
+        // Set frequency and key on
+        double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
+        m->chip->set_frequency(voice_idx, hz, 0);
+        m->chip->key_on(voice_idx);
+        m->voices[voice_idx].midi_note = sfx.pending_note;
+        m->channel_active[voice_idx] = true;
+        
+        // Clear pending
+        sfx.pending_has_note = false;
+        return;
+    }
+}
+
 fm_voice_id fm_sfx_play(fm_module* m, fm_sfx_id id, int priority)
 {
-    (void)m;
-    (void)id;
-    (void)priority;
-    return FM_VOICE_INVALID;
+    if (!m || !m->chip) return FM_VOICE_INVALID;
+    if (m->mode == FM_MODE_CACHE) return FM_VOICE_INVALID;
+    if (id < 0 || id > 255) return FM_VOICE_INVALID;
+    if (!m->sfx_present[id]) return FM_VOICE_INVALID;
+    
+    FmSfxPattern& pat = m->sfx_patterns[id];
+    if (!pat.rows || pat.num_rows <= 0) return FM_VOICE_INVALID;
+    
+    // Find a voice to use for this SFX
+    // Priority rules:
+    // 1. Prefer free voices
+    // 2. Steal lowest priority voice (including piano which is 0)
+    // 3. If equal priority, steal oldest
+    
+    int best_voice = -1;
+    int best_priority = priority + 1;  // Start higher than our priority
+    int best_age = 0;
+    
+    for (int i = 0; i < 6; i++) {
+        if (!m->voices[i].active) {
+            // Free voice - take it immediately
+            best_voice = i;
+            break;
+        }
+        
+        // Check if we can steal this voice
+        if (m->voices[i].priority < best_priority ||
+            (m->voices[i].priority == best_priority && m->voices[i].age > best_age)) {
+            best_voice = i;
+            best_priority = m->voices[i].priority;
+            best_age = m->voices[i].age;
+        }
+    }
+    
+    if (best_voice < 0) return FM_VOICE_INVALID;  // Should not happen
+    
+    // Stop any existing SFX on this voice
+    if (m->voices[best_voice].active) {
+        m->chip->key_off(best_voice);
+        
+        // Clear any active SFX tracking for this voice
+        for (int i = 0; i < 6; i++) {
+            if (m->active_sfx[i].voice_idx == best_voice) {
+                m->active_sfx[i].active = false;
+                m->active_sfx[i].voice_idx = -1;
+            }
+        }
+    }
+    
+    // Find a free active_sfx slot
+    int slot = -1;
+    for (int i = 0; i < 6; i++) {
+        if (!m->active_sfx[i].active) {
+            slot = i;
+            break;
+        }
+    }
+    
+    if (slot < 0) return FM_VOICE_INVALID;  // No free SFX slots
+    
+    // Initialize the SFX
+    FmActiveSfx& sfx = m->active_sfx[slot];
+    sfx.sfx_id = id;
+    sfx.priority = priority;
+    sfx.voice_idx = best_voice;
+    sfx.current_row = 0;
+    sfx.sample_in_row = KEY_OFF_GAP_SAMPLES;  // Start after gap
+    sfx.ticks_remaining = pat.num_rows;
+    sfx.last_patch_id = -1;
+    sfx.pending_has_note = false;
+    sfx.pending_note = -1;
+    sfx.pending_patch_id = -1;
+    sfx.active = true;
+    
+    // Update voice state
+    m->voices[best_voice].active = true;
+    m->voices[best_voice].priority = priority;
+    m->voices[best_voice].sfx_id = id;
+    m->voices[best_voice].age = ++m->voice_age_counter;
+    m->voices[best_voice].midi_note = -1;
+    m->channel_active[best_voice] = false;
+    
+    // Process first row immediately (sets up pending note)
+    sfx_process_row(m, best_voice, 0);
+    
+    // Commit key-on immediately (we're already past the gap)
+    sfx_commit_keyon(m, best_voice);
+    
+    return best_voice;
+}
+
+// Internal: Update active SFX voices (called from fm_mix each frame)
+// Advances SFX by 1 sample. Call this in a loop for each sample in the buffer.
+static void update_sfx_voice(fm_module* m, int slot)
+{
+    FmActiveSfx& sfx = m->active_sfx[slot];
+    if (!sfx.active) return;
+    if (sfx.ticks_remaining <= 0) return;
+    
+    FmSfxPattern& pat = m->sfx_patterns[sfx.sfx_id];
+    int voice = sfx.voice_idx;
+    
+    // Advance sample counter
+    sfx.sample_in_row++;
+    
+    // Check if we've crossed the gap boundary - commit key-on
+    if (sfx.sample_in_row == KEY_OFF_GAP_SAMPLES && sfx.pending_has_note) {
+        sfx_commit_keyon(m, voice);
+    }
+    
+    // Check if we've reached end of row
+    if (sfx.sample_in_row >= pat.samples_per_row) {
+        sfx.sample_in_row = 0;
+        sfx.ticks_remaining--;
+        sfx.current_row++;
+        
+        // SFX finished?
+        if (sfx.ticks_remaining <= 0) {
+            m->chip->key_off(voice);
+            m->voices[voice].active = false;
+            m->voices[voice].priority = 0;
+            m->voices[voice].sfx_id = -1;
+            m->voices[voice].midi_note = -1;
+            m->channel_active[voice] = false;
+            sfx.active = false;
+            sfx.voice_idx = -1;
+            return;
+        }
+        
+        // Process next row if within pattern
+        if (sfx.current_row < pat.num_rows) {
+            sfx_process_row(m, voice, sfx.current_row);
+        }
+    }
+}
+
+// Update all SFX voices by a given number of samples
+static void update_sfx(fm_module* m, int num_samples)
+{
+    for (int i = 0; i < num_samples; i++) {
+        for (int slot = 0; slot < 6; slot++) {
+            update_sfx_voice(m, slot);
+        }
+    }
 }
 
 // =============================================================================
@@ -486,6 +890,8 @@ fm_voice_id fm_note_on(fm_module* m, int midi_note, fm_patch_id patch_id, int ve
     m->voices[voice_idx].patch_id = patch_id;
     m->voices[voice_idx].active = true;
     m->voices[voice_idx].age = ++m->voice_age_counter;
+    m->voices[voice_idx].priority = 0;  // Piano has lowest priority
+    m->voices[voice_idx].sfx_id = -1;
     m->channel_active[voice_idx] = true;
 
     // Return voice ID
@@ -525,6 +931,9 @@ void fm_mix(fm_module* m, int16_t* stream, int frames)
         std::memset(stream, 0, frames * 2 * sizeof(int16_t));
         return;
     }
+
+    // Update active SFX for each sample in the buffer
+    update_sfx(m, frames);
 
     // SYNTH mode: generate from chip
     // Note: chip generates at 44100 Hz internally

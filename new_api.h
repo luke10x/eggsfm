@@ -379,34 +379,36 @@ int fm_song_get_row(fm_module* m);
  * SFX DECLARATION
  * ============================================================================= */
 
-fm_sfx_id fm_sfx_declare_source(
+/**
+ * Declare an SFX pattern.
+ * 
+ * Pattern format is single-channel Furnace format:
+ *   First line: number of rows
+ *   Each row: note(3) + instrument(2) + volume(2)
+ * 
+ * Example:
+ *   "6\n"
+ *   "C-4007F\n"
+ *   "E-4007F\n"
+ *   "G-4007F\n"
+ *   "C-5007F\n"
+ *   "OFF....\n"
+ *   ".......\n"
+ *
+ * @param m module
+ * @param id SFX ID (0-255) to assign
+ * @param pattern_text Furnace pattern text
+ * @param tick_rate ticks per second (e.g. 60)
+ * @param speed ticks per row (e.g. 3 = 50ms/row)
+ * @return SFX ID or -1 on error
+ */
+fm_sfx_id fm_sfx_declare(
     fm_module* m,
-    const char* pattern,
-    int ticks,
+    fm_sfx_id id,
+    const char* pattern_text,
+    int tick_rate,
     int speed
 );
-
-fm_sfx_id fm_sfx_declare_cache(
-    fm_module* m,
-    void* buffer,
-    int byte_capacity,
-    int original_ticks,
-    int original_speed,
-    int original_steps
-);
-
-/* =============================================================================
- * SFX CACHE LINKING
- * ============================================================================= */
-
-void fm_attach_sfx_cache(
-    fm_module* m,
-    fm_sfx_id synth_sfx_id,
-    fm_sfx_id cache_sfx_id
-);
-
-int  fm_sfx_cached_progress(fm_module* m, fm_sfx_id cache_sfx_id);
-bool fm_sfx_is_cached      (fm_module* m, fm_sfx_id cache_sfx_id);
 
 /* =============================================================================
  * SFX CONTROL
@@ -415,11 +417,22 @@ bool fm_sfx_is_cached      (fm_module* m, fm_sfx_id cache_sfx_id);
 /**
  * Play SFX.
  *
- * CACHE mode:
- *   Unlimited simultaneous playback.
+ * Uses voice stealing:
+ *   - Prefers free voices
+ *   - Steals lowest priority voice if all busy
+ *   - If equal priority, steals oldest
  *
- * SYNTH mode:
- *   Limited by chip voices.
+ * Priority scale:
+ *   0 = piano/manual notes (lowest)
+ *   1-2 = ambient SFX
+ *   3-4 = common gameplay
+ *   5-6 = significant events
+ *   7-9 = critical/must-hear
+ *
+ * @param m module
+ * @param id SFX ID from fm_sfx_declare
+ * @param priority 0-9 (higher = harder to steal)
+ * @return voice ID or FM_VOICE_INVALID
  */
 fm_voice_id fm_sfx_play(
     fm_module* m,
