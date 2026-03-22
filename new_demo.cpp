@@ -22,6 +22,7 @@
 #include <algorithm>
 
 #include "new_api.h"
+#include "new_opn_editor.h"
 
 // =============================================================================
 // INSTRUMENT PATCHES (from demo7)
@@ -521,6 +522,10 @@ struct AppState
     bool pianoKeyHeld[12] = {}; // which of the 12 keys are pressed
     int  pianoVoice[12]  = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}; // voice ID for each key
 
+    // Patch editors (one per instrument)
+    OPNPatchEditor editors[6];  // [0]=PATCH_00, [1]=PATCH_01, [2]=PATCH_HIHAT, [3]=PATCH_KICK, [4]=PATCH_SNARE, [5]=PATCH_CLANG
+    bool editorsInitialized = false;
+
     Uint32 lastTick    = 0;
     float  fpsSmooth   = 0.0f;
     float  displayFps  = 0.0f;
@@ -927,7 +932,60 @@ static void drawPanel(AppState& app)
     // SECTION 7 — INSTRUMENTS
     // =========================================================================
     ImGui::SeparatorText("Instruments");
-    ImGui::TextDisabled("Instrument editors pending...");
+    
+    if (app.sound_running) {
+        // Initialize editors on first frame
+        if (!app.editorsInitialized) {
+            app.editors[0].init("PATCH_00",   PATCH_00,   false, 0, 0);
+            app.editors[1].init("PATCH_01",   PATCH_01,   false, 0, 0);
+            app.editors[2].init("PATCH_HIHAT",PATCH_HIHAT,false, 0, 0);
+            app.editors[3].init("PATCH_KICK", PATCH_KICK, false, 0, 0);
+            app.editors[4].init("PATCH_SNARE",PATCH_SNARE,false, 0, 0);
+            app.editors[5].init("PATCH_CLANG",PATCH_CLANG,false, 0, 0);
+            app.editorsInitialized = true;
+        }
+        
+        static const char* EDITOR_NAMES[] = {"PATCH_00", "PATCH_01", "PATCH_HIHAT", "PATCH_KICK", "PATCH_SNARE", "PATCH_CLANG"};
+        static const int EDITOR_PATCH_IDS[] = {0x00, 0x01, 0x02, 0x20, 0x21, 0x23};
+        
+        // Song 1 row (3 instruments)
+        ImGui::TextDisabled("Song 1:");
+        float edBtnW3 = (panelW - 40.f) / 3.f;
+        for (int i = 0; i < 3; i++) {
+            if (i > 0) ImGui::SameLine();
+            OPNPatchEditor& ed = app.editors[i];
+            ImVec4 col = ed.open ? ImVec4(0.3f, 0.5f, 0.7f, 1.f) : ImVec4(0.18f, 0.28f, 0.38f, 1.f);
+            ImGui::PushStyleColor(ImGuiCol_Button, col);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f, 0.6f, 0.8f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.7f, 0.9f, 1.f));
+            char lbl[32];
+            snprintf(lbl, sizeof(lbl), "%s##ed%d", EDITOR_NAMES[i], i);
+            if (ImGui::Button(lbl, ImVec2(edBtnW3, 0))) {
+                ed.open = !ed.open;
+            }
+            ImGui::PopStyleColor(3);
+        }
+        
+        // Song 2 row (3 instruments)
+        ImGui::TextDisabled("Song 2:");
+        float edBtnW4 = (panelW - 40.f) / 3.f;
+        for (int i = 3; i < 6; i++) {
+            if (i > 3) ImGui::SameLine();
+            OPNPatchEditor& ed = app.editors[i];
+            ImVec4 col = ed.open ? ImVec4(0.3f, 0.5f, 0.7f, 1.f) : ImVec4(0.18f, 0.28f, 0.38f, 1.f);
+            ImGui::PushStyleColor(ImGuiCol_Button, col);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f, 0.6f, 0.8f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.7f, 0.9f, 1.f));
+            char lbl[32];
+            snprintf(lbl, sizeof(lbl), "%s##ed%d", EDITOR_NAMES[i], i);
+            if (ImGui::Button(lbl, ImVec2(edBtnW4, 0))) {
+                ed.open = !ed.open;
+            }
+            ImGui::PopStyleColor(3);
+        }
+    } else {
+        ImGui::TextDisabled("Start sound system to edit instruments.");
+    }
 
     // =========================================================================
     // FOOTER — FPS
@@ -936,6 +994,26 @@ static void drawPanel(AppState& app)
     ImGui::TextDisabled("%.0f fps  %.2f ms", app.displayFps, app.displayMs);
 
     ImGui::End();
+    
+    // Draw patch editor windows (outside main panel)
+    if (app.sound_running && app.editorsInitialized) {
+        static const char* EDITOR_NAMES[] = {"PATCH_00", "PATCH_01", "PATCH_HIHAT", "PATCH_KICK", "PATCH_SNARE", "PATCH_CLANG"};
+        static const int EDITOR_PATCH_IDS[] = {0x00, 0x01, 0x02, 0x20, 0x21, 0x23};
+        
+        for (int i = 0; i < 6; i++) {
+            OPNPatchEditor& ed = app.editors[i];
+            char wndTitle[64];
+            snprintf(wndTitle, sizeof(wndTitle), "OPN Editor — %s###opned%d", EDITOR_NAMES[i], i);
+            
+            if (ed.drawWindow(wndTitle, ImVec2(500, 640))) {
+                // Patch was modified — update both music and SFX modules
+                SDL_LockAudioDevice(app.audio_dev);
+                fm_patch_set(app.music_module, EDITOR_PATCH_IDS[i], &ed.patch, sizeof(ed.patch), FM_CHIP_YM2612);
+                fm_patch_set(app.sfx_module, EDITOR_PATCH_IDS[i], &ed.patch, sizeof(ed.patch), FM_CHIP_YM2612);
+                SDL_UnlockAudioDevice(app.audio_dev);
+            }
+        }
+    }
 }
 
 // =============================================================================
