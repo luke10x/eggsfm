@@ -101,6 +101,19 @@ public:
     void key_off(int ch) {
         write(0, 0x28, ((ch >= 3) ? 0x04 : 0x00) | (ch % 3));
     }
+    
+    // Hard mute - instantly silence channel by maxing out TL on all operators
+    // This is more aggressive than key_off which still plays release envelope
+    void hard_mute(int ch) {
+        const uint8_t port = (ch >= 3) ? 1 : 0;
+        const int hwch = ch % 3;
+        // Set TL=127 (max attenuation = silence) on all 4 operators
+        for (int slot = 0; slot < 4; slot++) {
+            write(port, 0x40 + slot * 4 + hwch, 0x7F);
+        }
+        // Also key off to reset state
+        // key_off(ch);
+    }
 
     // Generate one sample at 44100 Hz reference rate
     void generate(int16_t* L, int16_t* R) {
@@ -150,6 +163,13 @@ static inline int get_min_gap_samples(int sample_rate)
     return (250 * sample_rate) / 44100;
 }
 
+// Hard mute threshold - if we're this close to keyon and RR hasn't released, force mute
+// ~3ms at 44100Hz - last resort to prevent note bleed
+static inline int get_hard_mute_threshold(int sample_rate)
+{
+    return (200 * sample_rate) / 44100;
+}
+
 static inline int get_dynamic_gap(int sample_rate, int rows_until_next, int samples_per_row)
 {
     if (rows_until_next <= 0) return get_min_gap_samples(sample_rate);
@@ -159,6 +179,7 @@ static inline int get_dynamic_gap(int sample_rate, int rows_until_next, int samp
     int base_gap = get_min_gap_samples(sample_rate);
     int dynamic_gap = base_gap + (rows_until_next * samples_per_row * 4 / 10);
     int max_gap = (250 * sample_rate) / 44100;
+    
     return std::min(max_gap, dynamic_gap);
 }
 
@@ -355,6 +376,8 @@ fm_module* fm_module_create(int sample_rate, int buffer_frames, fm_chip_type chi
         m->active_sfx[i].pending_note = -1;
         m->active_sfx[i].pending_patch_id = -1;
         m->active_sfx[i].pending_gap = get_min_gap_samples(m->sample_rate);
+        
+        
         m->active_sfx[i].active = false;
     }
 
@@ -651,20 +674,32 @@ static void sfx_process_row(fm_module* m, int voice_idx, int row_idx)
         // OFF note - key off
         m->chip->key_off(voice_idx);
     } else if (ev.note >= 0) {
-        // New note - key off immediately
-        m->chip->key_off(voice_idx);
-        
         // Look ahead to find next note
         int next_note_row = find_next_sfx_note_row(pat, row_idx);
         if (next_note_row >= 0) {
-            // Calculate dynamic gap based on distance to next note
+            // Calculate distance to next note in samples
             int rows_until_next = next_note_row - row_idx;
-            sfx->pending_gap = get_dynamic_gap(m->sample_rate, rows_until_next, pat.samples_per_row);
+            int samples_until_next = rows_until_next * pat.samples_per_row;
+            
+            // If next note is very close (< 10ms), skip gap entirely
+            int threshold = (440 * m->sample_rate) / 44100;  // ~10ms
+            if (samples_until_next < threshold) {
+                sfx->pending_gap = 0;  // No gap - immediate keyon
+            } else {
+                // Normal case - use dynamic gap for RR release
+                int gap = get_min_gap_samples(m->sample_rate) + (rows_until_next * pat.samples_per_row * 4 / 10);
+                int max_gap = (250 * m->sample_rate) / 44100;
+                sfx->pending_gap = std::min(max_gap, gap);
+            }
         } else {
             // No next note - use default gap
             sfx->pending_gap = get_min_gap_samples(m->sample_rate);
         }
-        
+
+        // Key off immediately
+        m->chip->key_off(voice_idx);
+        m->channel_active[voice_idx] = false;
+
         sfx->pending_has_note = true;
         sfx->pending_note = ev.note;
         sfx->pending_patch_id = (ev.patch_id >= 0) ? ev.patch_id : sfx->last_patch_id;
@@ -683,25 +718,32 @@ static void sfx_commit_keyon(fm_module* m, int voice_idx, int current_gap)
         if (sfx.pending_patch_id < 0) return;
         if (!m->patch_present[sfx.pending_patch_id]) return;
         
-        // Check if gap has elapsed
-        if (current_gap < sfx.pending_gap) return;
+        // If gap is 0, key on immediately (fast passage)
+        if (sfx.pending_gap == 0) {
+            m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
+            m->current_patch[voice_idx] = sfx.pending_patch_id;
+            double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
+            m->chip->set_frequency(voice_idx, hz, 0);
+            m->chip->key_on(voice_idx);
+            m->voices[voice_idx].midi_note = sfx.pending_note;
+            m->channel_active[voice_idx] = true;
+            sfx.pending_has_note = false;
+            return;
+        }
+        
+        // Wait until gap has fully elapsed before keying on
+        if (current_gap < sfx.pending_gap) {
+            return;
+        }
 
-        // Key off first to ensure clean retrigger
-        m->chip->key_off(voice_idx);
-        m->channel_active[voice_idx] = false;
-
-        // Load patch
+        // Load patch and key on
         m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
         m->current_patch[voice_idx] = sfx.pending_patch_id;
-
-        // Set frequency and key on
         double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
         m->chip->set_frequency(voice_idx, hz, 0);
         m->chip->key_on(voice_idx);
         m->voices[voice_idx].midi_note = sfx.pending_note;
         m->channel_active[voice_idx] = true;
-
-        // Clear pending
         sfx.pending_has_note = false;
         sfx.pending_gap = get_min_gap_samples(m->sample_rate);
         return;
@@ -1054,20 +1096,33 @@ static void song_process_row(fm_module* m, int row_idx)
             // Fully reset channel state before new note
             ch_state.pending_has_note = false;
             ch_state.pending_is_off = false;
-            
+
             // Look ahead to find next note on this channel
             int next_note_row = find_next_note_row(pat, row_idx, ch);
             if (next_note_row >= 0) {
-                // Calculate dynamic gap based on distance to next note
-                // More distance = longer gap for release
+                // Calculate distance to next note in samples
                 int rows_until_next = next_note_row - row_idx;
-                // Use 44 + (rows * 10) samples, capped at 250
-                ch_state.pending_gap = get_dynamic_gap(m->sample_rate, rows_until_next, pat.samples_per_row);
+                int samples_until_next = rows_until_next * pat.samples_per_row;
+                
+                // If next note is very close (< 10ms), skip gap entirely
+                int threshold = (440 * m->sample_rate) / 44100;  // ~10ms
+                if (samples_until_next < threshold) {
+                    ch_state.pending_gap = 0;  // No gap - immediate keyon
+                } else {
+                    // Normal case - use dynamic gap for RR release
+                    int gap = get_min_gap_samples(m->sample_rate) + (rows_until_next * pat.samples_per_row * 4 / 10);
+                    int max_gap = (250 * m->sample_rate) / 44100;
+                    ch_state.pending_gap = std::min(max_gap, gap);
+                }
             } else {
                 // No next note - use default gap
                 ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
             }
-            
+
+            // Key off immediately
+            m->chip->key_off(ch);
+            m->channel_active[ch] = false;
+
             // Mark for key-on after gap
             ch_state.pending_has_note = true;
             ch_state.pending_note = ev.note;
@@ -1090,13 +1145,40 @@ static void song_commit_keyon(fm_module* m, int current_gap)
         if (ch_state.pending_patch < 0) continue;
         if (!m->patch_present[ch_state.pending_patch]) continue;
         
-        // Check if this channel's gap has elapsed
-        if (current_gap < ch_state.pending_gap) continue;
-
-        // Load patch and apply volume
-        fm_patch_opn patch = m->patches[ch_state.pending_patch];
+        // If gap is 0, key on immediately (fast passage)
+        if (ch_state.pending_gap == 0) {
+            // Load patch and key on immediately
+            fm_patch_opn patch = m->patches[ch_state.pending_patch];
+            int tl_add = ((0x7F - ch_state.current_volume) * 127) / 0x7F;
+            bool isCarrier[4] = {false, false, false, false};
+            switch(patch.ALG) {
+                case 0: case 1: case 2: case 3: isCarrier[3] = true; break;
+                case 4: isCarrier[1] = isCarrier[3] = true; break;
+                case 5: case 6: isCarrier[1] = isCarrier[2] = isCarrier[3] = true; break;
+                case 7: isCarrier[0] = isCarrier[1] = isCarrier[2] = isCarrier[3] = true; break;
+            }
+            for(int op = 0; op < 4; op++) {
+                if(isCarrier[op]) {
+                    patch.op[op].TL = std::min(127, (int)patch.op[op].TL + tl_add);
+                }
+            }
+            m->chip->load_patch(patch, ch);
+            m->current_patch[ch] = ch_state.pending_patch;
+            double hz = 440.0 * std::pow(2.0, (ch_state.pending_note - 69) / 12.0);
+            m->chip->set_frequency(ch, hz, 0);
+            m->chip->key_on(ch);
+            m->channel_active[ch] = true;
+            ch_state.pending_has_note = false;
+            continue;
+        }
         
-        // Apply volume to carrier operators based on algorithm
+        // Wait until gap has fully elapsed before keying on
+        if (current_gap < ch_state.pending_gap) {
+            continue;
+        }
+
+        // Gap elapsed - load patch and key on new note
+        fm_patch_opn patch = m->patches[ch_state.pending_patch];
         int tl_add = ((0x7F - ch_state.current_volume) * 127) / 0x7F;
         bool isCarrier[4] = {false, false, false, false};
         switch(patch.ALG) {
@@ -1110,23 +1192,14 @@ static void song_commit_keyon(fm_module* m, int current_gap)
                 patch.op[op].TL = std::min(127, (int)patch.op[op].TL + tl_add);
             }
         }
-        
-        // Key off first to ensure clean retrigger
-        m->chip->key_off(ch);
-        m->channel_active[ch] = false;
-        
+
         m->chip->load_patch(patch, ch);
         m->current_patch[ch] = ch_state.pending_patch;
-
-        // Set frequency and key on
         double hz = 440.0 * std::pow(2.0, (ch_state.pending_note - 69) / 12.0);
         m->chip->set_frequency(ch, hz, 0);
         m->chip->key_on(ch);
         m->channel_active[ch] = true;
-
-        // Clear pending state completely
         ch_state.pending_has_note = false;
-        ch_state.pending_is_off = false;
         ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
     }
 }
