@@ -1,26 +1,69 @@
 #pragma once
 // =============================================================================
 // new_opn_editor.h — YM2612/OPN2 patch editor ImGui widget for new API
-//
-// Standalone header — no global state, no static globals.
-// Include after new_api.h and ImGui headers.
+// Uses IngameFMSerializer from ingamefm_patch_serializer.h for code export/import
 // =============================================================================
 
 #include "imgui.h"
 #include "new_api.h"
+#include "ingamefm_patch_serializer.h"
 #include <cstdio>
 #include <cstring>
+#include <string>
 
-// =============================================================================
-// INTERNAL DRAWING HELPERS
-// =============================================================================
+// Helper to convert between new API (fm_patch_opn) and old API (YM2612Patch)
+inline YM2612Patch toOldPatch(const fm_patch_opn& p)
+{
+    YM2612Patch old = {};
+    old.ALG = p.ALG;
+    old.FB  = p.FB;
+    old.AMS = 0;
+    old.FMS = 0;
+    for (int i = 0; i < 4; i++) {
+        old.op[i].DT   = p.op[i].DT;
+        old.op[i].MUL  = p.op[i].MUL;
+        old.op[i].TL   = p.op[i].TL;
+        old.op[i].RS   = p.op[i].RS;
+        old.op[i].AR   = p.op[i].AR;
+        old.op[i].AM   = p.op[i].AM;
+        old.op[i].DR   = p.op[i].DR;
+        old.op[i].SR   = p.op[i].SR;
+        old.op[i].SL   = p.op[i].SL;
+        old.op[i].RR   = p.op[i].RR;
+        old.op[i].SSG  = p.op[i].SSG;
+    }
+    return old;
+}
+
+inline fm_patch_opn toNewPatch(const YM2612Patch& old)
+{
+    fm_patch_opn p = {};
+    p.ALG = old.ALG;
+    p.FB  = old.FB;
+    p.LFO = 0;
+    for (int i = 0; i < 4; i++) {
+        p.op[i].DT   = old.op[i].DT;
+        p.op[i].MUL  = old.op[i].MUL;
+        p.op[i].TL   = old.op[i].TL;
+        p.op[i].RS   = old.op[i].RS;
+        p.op[i].AR   = old.op[i].AR;
+        p.op[i].AM   = old.op[i].AM;
+        p.op[i].DR   = old.op[i].DR;
+        p.op[i].SR   = old.op[i].SR;
+        p.op[i].SL   = old.op[i].SL;
+        p.op[i].RR   = old.op[i].RR;
+        p.op[i].SSG  = old.op[i].SSG;
+    }
+    return p;
+}
+
 namespace opn_editor_detail {
 
 static const ImU32 OP_COLORS[4] = {
-    IM_COL32(100, 200, 255, 255),   // OP1 — cyan-blue
-    IM_COL32(120, 255, 140, 255),   // OP2 — green
-    IM_COL32(255, 210,  80, 255),   // OP3 — amber
-    IM_COL32(255, 110, 110, 255),   // OP4 — red
+    IM_COL32(100, 200, 255, 255),
+    IM_COL32(120, 255, 140, 255),
+    IM_COL32(255, 210,  80, 255),
+    IM_COL32(255, 110, 110, 255),
 };
 
 inline void drawAlgoIndicator(ImDrawList* dl, ImVec2 p0, ImVec2 sz, int algo)
@@ -129,87 +172,77 @@ inline void drawEnvelopeIndicator(ImDrawList* dl, ImVec2 p0, ImVec2 sz,
 
 } // namespace opn_editor_detail
 
-// =============================================================================
-// OPNPatchEditor — the public API
-// =============================================================================
-
 struct OPNPatchEditor
 {
-    // ── Public state
     fm_patch_opn  patch;
     int         block      = 0;
     bool        lfoEnable  = false;
     int         lfoFreq    = 0;
-
-    // ── Window/popup state
     bool        open       = false;
+    int         activeTab  = 0;
 
-    // ── Internal
-    int  activeTab     = 0;
+    static constexpr int CODE_BUF_SIZE = 8192;
+    char codeBuf[CODE_BUF_SIZE] = {};
 
     fm_patch_opn  savedPatch;
     bool        savedLfoEnable = false;
     int         savedLfoFreq   = 0;
     bool        hasSaved       = false;
-    char patchName[64] = "PATCH";
+    bool        codeHasError   = false;
+    char        codeError[256] = {};
+    int         codeErrLine    = 0;
+    int         codeErrCol     = 0;
+    char        patchName[64]  = "PATCH";
 
-    // ── Init
     void init(const char* name, const fm_patch_opn& p,
               bool lfoEn = false, int lfoFr = 0, int blk = 0)
     {
-        patch      = p;
-        lfoEnable  = lfoEn;
-        lfoFreq    = lfoFr;
-        block      = blk;
-        activeTab  = 0;
-        hasSaved   = false;
+        patch = p; lfoEnable = lfoEn; lfoFreq = lfoFr; block = blk;
+        activeTab = 0; hasSaved = false; codeHasError = false;
         snprintf(patchName, sizeof(patchName), "%s", name);
     }
 
-    // ── draw() — renders inline. Returns true if patch was modified.
     bool draw()
     {
         using namespace opn_editor_detail;
         bool changed = false;
 
-        // Tab buttons
         const ImVec4 tabAct = ImGui::GetStyleColorVec4(ImGuiCol_TabActive);
         const ImVec4 tabInact = ImGui::GetStyleColorVec4(ImGuiCol_Tab);
         auto drawTab = [&](const char* lbl, int idx) -> bool {
             bool active = (activeTab==idx);
             ImGui::PushStyleColor(ImGuiCol_Button, active?tabAct:tabInact);
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_TabHovered));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyleColorVec4(ImGuiCol_TabActive));
             bool clicked = ImGui::Button(lbl);
             ImGui::PopStyleColor(3);
             return clicked;
         };
         if(drawTab("Designer##tab", 0)) activeTab = 0;
         ImGui::SameLine();
-        if(drawTab("Code##tab", 1)) activeTab = 1;
+        if(drawTab("Code##tab", 1)) {
+            activeTab = 1;
+            refreshCodeBuf();  // Populate code when switching to Code tab
+        }
         ImGui::Separator(); ImGui::Spacing();
 
         if(activeTab==0) {
-            // Global controls - use temp int variables for sliders
             ImGui::Text("Global"); ImGui::Spacing();
             {
                 float avail=ImGui::GetContentRegionAvail().x;
                 float sp=ImGui::GetStyle().ItemSpacing.x;
                 float lw=ImGui::CalcTextSize("LFO").x+sp;
                 float sw=(avail-lw*3.f-sp*2.f)/3.f; if(sw<30)sw=30;
-
                 int alg = patch.ALG, fb = patch.FB, lfo = patch.LFO;
                 ImGui::Text("ALG"); ImGui::SameLine(); ImGui::SetNextItemWidth(sw);
                 if(ImGui::SliderInt("##ALG",&alg,0,7)) { patch.ALG = (uint8_t)alg; changed=true; }
                 ImGui::SameLine();
-                ImGui::Text("FB");  ImGui::SameLine(); ImGui::SetNextItemWidth(sw);
+                ImGui::Text("FB"); ImGui::SameLine(); ImGui::SetNextItemWidth(sw);
                 if(ImGui::SliderInt("##FB", &fb, 0,7)) { patch.FB = (uint8_t)fb; changed=true; }
                 ImGui::SameLine();
                 ImGui::Text("LFO"); ImGui::SameLine(); ImGui::SetNextItemWidth(sw);
                 if(ImGui::SliderInt("##LFO",&lfo,0,255)) { patch.LFO = (uint8_t)lfo; changed=true; }
             }
-
-            // ALG diagram
             {
                 ImVec2 cSize(ImGui::GetContentRegionAvail().x,72.f);
                 ImVec2 cPos=ImGui::GetCursorScreenPos();
@@ -221,8 +254,6 @@ struct OPNPatchEditor
                 drawAlgoIndicator(dl,ImVec2(cPos.x,cPos.y+14.f),ImVec2(cSize.x,cSize.y-14.f),patch.ALG);
             }
             ImGui::Spacing();
-
-            // LFO
             {
                 static const char* LFO_LBLS[]={"3.82 Hz","5.33 Hz","5.77 Hz","6.11 Hz","6.60 Hz","9.23 Hz","46.11 Hz","69.22 Hz"};
                 if(ImGui::Checkbox("LFO",&lfoEnable)) changed=true;
@@ -240,14 +271,10 @@ struct OPNPatchEditor
                 ImGui::EndDisabled();
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-
-            // Block
             ImGui::Text("Block (octave offset)"); ImGui::SameLine();
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if(ImGui::SliderInt("##block",&block,-2,4)) changed=true;
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
-
-            // Operator table
             ImGui::Text("Operators"); ImGui::Spacing();
             if(ImGui::BeginTable("##ops",4,ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_SizingStretchSame))
             {
@@ -255,38 +282,29 @@ struct OPNPatchEditor
                 ImGui::TableSetupColumn("OP 3"); ImGui::TableSetupColumn("OP 4");
                 ImGui::TableHeadersRow();
                 ImGui::TableNextRow();
-
                 for(int op=0;op<4;op++) {
                     ImGui::TableSetColumnIndex(op);
                     fm_patch_opn_operator& o=patch.op[op];
                     char s[16];
                     ImU32 opCol=OP_COLORS[op];
-                    
-                    // Envelope visualizer
                     {float envH=42.f,envW=ImGui::GetContentRegionAvail().x;
                      ImVec2 envPos=ImGui::GetCursorScreenPos();
                      snprintf(s,sizeof(s),"##env%d",op);
                      ImGui::InvisibleButton(s,ImVec2(envW,envH));
                      drawEnvelopeIndicator(ImGui::GetWindowDrawList(),envPos,ImVec2(envW,envH),o,opCol);}
-                    
-                    // Use temp int variables for sliders
                     int tl=o.TL,ssg=o.SSG,ar=o.AR,dr=o.DR,sr=o.SR,sl=o.SL,rr=o.RR;
                     int mul=o.MUL,dt=o.DT,rs=o.RS,am=o.AM;
-                    
                     ImGui::Text("TL"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1);
                     snprintf(s,sizeof(s),"##TL%d",op);
                     if(ImGui::SliderInt(s,&tl,0,127)) { o.TL=(uint8_t)tl; changed=true; }
-                    
                     ImGui::Text("SSG"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1);
                     snprintf(s,sizeof(s),"##SSG%d",op);
                     if(ImGui::SliderInt(s,&ssg,0,8)) { o.SSG=(uint8_t)ssg; changed=true; }
-                    
                     {float ssgH=18.f,ssgW=ImGui::GetContentRegionAvail().x;
                      ImVec2 ssgPos=ImGui::GetCursorScreenPos();
                      snprintf(s,sizeof(s),"##ssg%d",op);
                      ImGui::InvisibleButton(s,ImVec2(ssgW,ssgH));
                      drawSsgIndicator(ImGui::GetWindowDrawList(),ssgPos,ImVec2(ssgW,ssgH),o.SSG,opCol);}
-                    
                     ImGui::Text("AR"); ImGui::SameLine(); ImGui::SetNextItemWidth(-1);
                     snprintf(s,sizeof(s),"##AR%d",op);
                     if(ImGui::SliderInt(s,&ar,0,31)) { o.AR=(uint8_t)ar; changed=true; }
@@ -319,15 +337,43 @@ struct OPNPatchEditor
             }
         }
 
-        // Code tab - simplified (just shows current values)
         if(activeTab==1) {
-            ImGui::TextDisabled("Code export not yet implemented. Use Designer tab.");
+            const float bottomH=ImGui::GetFrameHeightWithSpacing()*2.f+8.f;
+            ImVec2 avail=ImGui::GetContentRegionAvail();
+            float textH=avail.y-bottomH; if(textH<60.f)textH=60.f;
+            ImVec2 textPos=ImGui::GetCursorScreenPos();
+            ImGui::InputTextMultiline("##code",codeBuf,CODE_BUF_SIZE,
+                ImVec2(avail.x,textH),ImGuiInputTextFlags_AllowTabInput);
+            if(codeHasError&&codeErrLine>0) {
+                float lineH=ImGui::GetTextLineHeight();
+                float lineY=textPos.y+(codeErrLine-1)*lineH;
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(textPos.x,lineY),ImVec2(textPos.x+avail.x,lineY+lineH),
+                    IM_COL32(200,40,40,60));
+            }
+            ImGui::Spacing();
+            float btnW=(avail.x-ImGui::GetStyle().ItemSpacing.x)*.5f;
+            if(ImGui::Button("Apply & Close",ImVec2(btnW,0))) {
+                if(tryApplyCode()){activeTab=0;changed=true;}
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!hasSaved);
+            if(ImGui::Button("Restore",ImVec2(btnW,0))) {
+                restoreToSaved(); activeTab=0; changed=true;
+            }
+            ImGui::EndDisabled();
+            if(codeHasError) {
+                ImGui::PushStyleColor(ImGuiCol_Text,IM_COL32(255,90,90,255));
+                if(codeErrLine>0){char loc[64];snprintf(loc,sizeof(loc),"Line %d col %d: ",codeErrLine,codeErrCol);ImGui::TextUnformatted(loc);ImGui::SameLine();}
+                ImGui::TextWrapped("%s",codeError);
+                ImGui::PopStyleColor();
+            } else {
+                ImGui::TextDisabled("Edit C++ patch code, then Apply & Close.");
+            }
         }
-
         return changed;
     }
 
-    // ── drawWindow() — opens a standalone ImGui window.
     bool drawWindow(const char* title, ImVec2 size=ImVec2(480,600))
     {
         if(!open) return false;
@@ -339,5 +385,49 @@ struct OPNPatchEditor
         ImGui::End();
         if(!stillOpen) open=false;
         return changed;
+    }
+
+private:
+    void refreshCodeBuf() {
+        YM2612Patch old = toOldPatch(patch);
+        std::string code = IngameFMSerializer::serialize(old, patchName, block, lfoEnable?1:0, lfoFreq);
+        snprintf(codeBuf, CODE_BUF_SIZE, "%s", code.c_str());
+        codeHasError=false; codeError[0]='\0'; codeErrLine=0; codeErrCol=0;
+    }
+    bool tryApplyCode() {
+        YM2612Patch outOld = {};
+        int outBlock=0, outLfoEn=0, outLfoFreq=0;
+        std::string err;
+        int errLine=0, errCol=0;
+        bool ok = IngameFMSerializer::parse(std::string(codeBuf), outOld, outBlock, outLfoEn, outLfoFreq, err, errLine, errCol);
+        if (ok) {
+            patch = toNewPatch(outOld);
+            block = outBlock;
+            lfoEnable = (outLfoEn != 0);
+            lfoFreq = outLfoFreq;
+            savedPatch = patch;
+            savedLfoEnable = lfoEnable;
+            savedLfoFreq = lfoFreq;
+            hasSaved = true;
+            codeHasError = false;
+            codeError[0] = '\0';
+            return true;
+        } else {
+            codeHasError = true;
+            snprintf(codeError, sizeof(codeError), "%s", err.c_str());
+            codeErrLine = errLine;
+            codeErrCol = errCol;
+            return false;
+        }
+    }
+    void restoreToSaved() {
+        if(!hasSaved) return;
+        patch = savedPatch;
+        lfoEnable = savedLfoEnable;
+        lfoFreq = savedLfoFreq;
+        refreshCodeBuf();
+        savedPatch = patch;
+        savedLfoEnable = lfoEnable;
+        savedLfoFreq = lfoFreq;
     }
 };
