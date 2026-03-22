@@ -197,9 +197,10 @@ typedef int fm_patch_id;
  * ============================================================================= */
 
 typedef enum {
-    FM_CHIP_OPN = 0,   /* YM2612 / YM3438 */
-    FM_CHIP_OPM,       /* YM2151 */
-    FM_CHIP_OPQ,       /* extended */
+    FM_CHIP_YM2612 = 0,  /* OPN2 — original, authentic Sega sound */
+    FM_CHIP_YM3438,      /* OPN2C — CMOS, cleaner */
+    FM_CHIP_OPM,         /* YM2151 */
+    FM_CHIP_OPQ,         /* extended */
     FM_CHIP_OPL2,
     FM_CHIP_OPL3
 } fm_chip_type;
@@ -288,7 +289,7 @@ void fm_module_set_lfo(fm_module* m, bool enable, int freq);
  *
  * The data pointer must match the chip type:
  *
- *   FM_CHIP_OPN  → YM2612-style struct
+ *   FM_CHIP_YM2612/YM3438 → YM2612-style struct
  *   FM_CHIP_OPM  → YM2151-style struct
  *   FM_CHIP_OPL2 → OPL2 struct
  *   etc.

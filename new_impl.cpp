@@ -114,6 +114,14 @@ public:
 // FM MODULE INTERNAL STRUCTURE
 // =============================================================================
 
+// Voice state for polyphonic playback
+struct FmVoice {
+    int     midi_note;      // current MIDI note, -1 if free
+    int     patch_id;       // current patch
+    bool    active;         // voice is sounding
+    int     age;            // age counter for voice stealing (higher = older)
+};
+
 struct fm_module {
     // Configuration
     int             sample_rate;
@@ -130,7 +138,11 @@ struct fm_module {
     fm_patch_opn    patches[256];
     bool            patch_present[256];
 
-    // Channel state (6 channels for OPN)
+    // Voice pool (6 voices for OPN)
+    FmVoice         voices[6];
+    int             voice_age_counter;
+
+    // Channel state tracking
     int             current_patch[6];
     bool            channel_active[6];
 
@@ -150,8 +162,8 @@ struct fm_module {
 
 fm_module* fm_module_create(int sample_rate, int buffer_frames, fm_chip_type chip_type)
 {
-    // For now, only OPN is supported. OPM/OPL can be added later.
-    if (chip_type != FM_CHIP_OPN) {
+    // For now, only YM2612 and YM3438 are supported
+    if (chip_type != FM_CHIP_YM2612 && chip_type != FM_CHIP_YM3438) {
         // Future: allocate appropriate chip type
         // case FM_CHIP_OPM: chip = new FmChipOpm(); break;
         // case FM_CHIP_OPL2: chip = new FmChipOpl2(); break;
@@ -170,6 +182,7 @@ fm_module* fm_module_create(int sample_rate, int buffer_frames, fm_chip_type chi
     m->chip          = new (std::nothrow) FmChipOpn;
     m->lfo_enable    = false;
     m->lfo_freq      = 0;
+    m->voice_age_counter = 0;
 
     if (!m->chip) {
         delete m;
@@ -181,6 +194,14 @@ fm_module* fm_module_create(int sample_rate, int buffer_frames, fm_chip_type chi
     std::memset(m->patch_present, 0, sizeof(m->patch_present));
     std::memset(m->current_patch, -1, sizeof(m->current_patch));
     std::memset(m->channel_active, 0, sizeof(m->channel_active));
+
+    // Initialize voice pool
+    for (int i = 0; i < 6; i++) {
+        m->voices[i].midi_note = -1;
+        m->voices[i].patch_id = -1;
+        m->voices[i].active = false;
+        m->voices[i].age = 0;
+    }
 
     return m;
 }
@@ -244,9 +265,9 @@ void fm_patch_set(fm_module* m, fm_patch_id patch_id, const void* patch_data,
 {
     if (!m || !patch_data || patch_id < 0 || patch_id > 255) return;
 
-    // Only OPN patches supported for now
-    if (patch_type != FM_CHIP_OPN) return;
-    if (m->chip_type != FM_CHIP_OPN) return;
+    // Only YM2612/YM3438 patches supported for now
+    if (patch_type != FM_CHIP_YM2612 && patch_type != FM_CHIP_YM3438) return;
+    if (m->chip_type != FM_CHIP_YM2612 && m->chip_type != FM_CHIP_YM3438) return;
 
     // Validate size
     if (patch_size != sizeof(fm_patch_opn)) return;
@@ -404,8 +425,30 @@ fm_voice_id fm_sfx_play(fm_module* m, fm_sfx_id id, int priority)
 }
 
 // =============================================================================
-// NOTE TRIGGERING (what we need for piano)
+// NOTE TRIGGERING (polyphonic with voice stealing)
 // =============================================================================
+
+// Find a free voice, or steal the oldest one if all are busy
+static int allocate_voice(fm_module* m)
+{
+    // Look for a free voice first
+    for (int i = 0; i < 6; i++) {
+        if (!m->voices[i].active) {
+            return i;
+        }
+    }
+    
+    // All voices busy - steal the oldest one (highest age)
+    int oldest = 0;
+    int oldest_age = m->voices[0].age;
+    for (int i = 1; i < 6; i++) {
+        if (m->voices[i].age > oldest_age) {
+            oldest = i;
+            oldest_age = m->voices[i].age;
+        }
+    }
+    return oldest;
+}
 
 fm_voice_id fm_note_on(fm_module* m, int midi_note, fm_patch_id patch_id, int velocity)
 {
@@ -416,14 +459,18 @@ fm_voice_id fm_note_on(fm_module* m, int midi_note, fm_patch_id patch_id, int ve
     if (patch_id < 0 || patch_id > 255) return FM_VOICE_INVALID;
     if (!m->patch_present[patch_id]) return FM_VOICE_INVALID;
 
-    // For now, use channel 0 as the "piano voice"
-    // Future: implement proper voice allocation
-    int channel = 0;
+    // Allocate a voice (with stealing if necessary)
+    int voice_idx = allocate_voice(m);
+    
+    // If stealing an active voice, key it off first
+    if (m->voices[voice_idx].active) {
+        m->chip->key_off(voice_idx);
+    }
 
-    // Load patch if different
-    if (m->current_patch[channel] != patch_id) {
-        m->chip->load_patch(m->patches[patch_id], channel);
-        m->current_patch[channel] = patch_id;
+    // Load patch if different from current
+    if (m->current_patch[voice_idx] != patch_id) {
+        m->chip->load_patch(m->patches[patch_id], voice_idx);
+        m->current_patch[voice_idx] = patch_id;
     }
 
     // Calculate frequency from MIDI note (A4 = 69 = 440 Hz)
@@ -431,12 +478,18 @@ fm_voice_id fm_note_on(fm_module* m, int midi_note, fm_patch_id patch_id, int ve
 
     // Set frequency and key on
     (void)velocity; // Future: use for volume
-    m->chip->set_frequency(channel, hz, 0);
-    m->chip->key_on(channel);
-    m->channel_active[channel] = true;
+    m->chip->set_frequency(voice_idx, hz, 0);
+    m->chip->key_on(voice_idx);
+    
+    // Update voice state
+    m->voices[voice_idx].midi_note = midi_note;
+    m->voices[voice_idx].patch_id = patch_id;
+    m->voices[voice_idx].active = true;
+    m->voices[voice_idx].age = ++m->voice_age_counter;
+    m->channel_active[voice_idx] = true;
 
-    // Return channel as voice ID
-    return channel;
+    // Return voice ID
+    return voice_idx;
 }
 
 void fm_note_off(fm_module* m, fm_voice_id v)
@@ -444,7 +497,10 @@ void fm_note_off(fm_module* m, fm_voice_id v)
     if (!m || !m->chip) return;
     if (v < 0 || v > 5) return;
 
+    // Key off the voice
     m->chip->key_off(v);
+    m->voices[v].active = false;
+    m->voices[v].midi_note = -1;
     m->channel_active[v] = false;
 }
 

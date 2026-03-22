@@ -346,12 +346,13 @@ struct AppState
     // Sound settings (configured before start)
     int             sample_rate   = 44100;
     int             buffer_frames = 256;
-    fm_chip_type    chip_type     = FM_CHIP_OPN;
+    fm_chip_type    chip_type     = FM_CHIP_YM2612;
 
     // Piano state
     int  pianoInstrument = 0;   // index into piano instrument list
-    int  pianoHeldNote   = -1;  // MIDI note currently held, -1 if none
+    int  pianoHeldNote   = -1;  // MIDI note currently held (for mouse), -1 if none
     bool pianoKeyHeld[12] = {}; // which of the 12 keys are pressed
+    int  pianoVoice[12]  = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1}; // voice ID for each key
 
     Uint32 lastTick    = 0;
     float  fpsSmooth   = 0.0f;
@@ -422,12 +423,12 @@ static bool start_sound_system(AppState& app)
     }
 
     // Load patches into SFX module
-    fm_patch_set(app.sfx_module, 0x00, &PATCH_00, sizeof(PATCH_00), FM_CHIP_OPN);
-    fm_patch_set(app.sfx_module, 0x01, &PATCH_01, sizeof(PATCH_01), FM_CHIP_OPN);
-    fm_patch_set(app.sfx_module, 0x02, &PATCH_HIHAT, sizeof(PATCH_HIHAT), FM_CHIP_OPN);
-    fm_patch_set(app.sfx_module, 0x20, &PATCH_KICK, sizeof(PATCH_KICK), FM_CHIP_OPN);
-    fm_patch_set(app.sfx_module, 0x21, &PATCH_SNARE, sizeof(PATCH_SNARE), FM_CHIP_OPN);
-    fm_patch_set(app.sfx_module, 0x23, &PATCH_CLANG, sizeof(PATCH_CLANG), FM_CHIP_OPN);
+    fm_patch_set(app.sfx_module, 0x00, &PATCH_00, sizeof(PATCH_00), FM_CHIP_YM2612);
+    fm_patch_set(app.sfx_module, 0x01, &PATCH_01, sizeof(PATCH_01), FM_CHIP_YM2612);
+    fm_patch_set(app.sfx_module, 0x02, &PATCH_HIHAT, sizeof(PATCH_HIHAT), FM_CHIP_YM2612);
+    fm_patch_set(app.sfx_module, 0x20, &PATCH_KICK, sizeof(PATCH_KICK), FM_CHIP_YM2612);
+    fm_patch_set(app.sfx_module, 0x21, &PATCH_SNARE, sizeof(PATCH_SNARE), FM_CHIP_YM2612);
+    fm_patch_set(app.sfx_module, 0x23, &PATCH_CLANG, sizeof(PATCH_CLANG), FM_CHIP_YM2612);
 
     // Open SDL audio device
     SDL_AudioSpec desired{};
@@ -477,6 +478,14 @@ static void stop_sound_system(AppState& app)
     }
 
     app.sound_running = false;
+    
+    // Reset piano state
+    app.pianoHeldNote = -1;
+    for (int k = 0; k < 12; k++) {
+        app.pianoKeyHeld[k] = false;
+        app.pianoVoice[k] = -1;
+    }
+    
     std::printf("[new_demo] Sound stopped\n");
 }
 
@@ -507,11 +516,17 @@ static void drawPanel(AppState& app)
     ImGui::BeginDisabled(app.sound_running);
     {
         // Chip selector
-        static const char* CHIP_LBLS[] = { "YM2612 / YM3438 (OPN)" };
+        static const char* CHIP_LBLS[] = { "YM2612 — Original Sega", "YM3438 — Clean CMOS" };
+        int chipIdx = (app.chip_type == FM_CHIP_YM3438) ? 1 : 0;
+        
         ImGui::Text("Chip"); ImGui::SameLine();
         ImGui::SetNextItemWidth(-1.f);
-        if (ImGui::BeginCombo("##chip", CHIP_LBLS[0])) {
-            if (ImGui::Selectable(CHIP_LBLS[0], true)) {}
+        if (ImGui::BeginCombo("##chip", CHIP_LBLS[chipIdx])) {
+            for (int i = 0; i < 2; i++) {
+                if (ImGui::Selectable(CHIP_LBLS[i], i == chipIdx)) {
+                    app.chip_type = (i == 0) ? FM_CHIP_YM2612 : FM_CHIP_YM3438;
+                }
+            }
             ImGui::EndCombo();
         }
 
@@ -626,7 +641,7 @@ static void drawPanel(AppState& app)
 }
 
 // =============================================================================
-// PIANO KEYBOARD
+// PIANO KEYBOARD (polyphonic)
 // =============================================================================
 
 static void drawPiano(AppState& app)
@@ -661,7 +676,7 @@ static void drawPiano(AppState& app)
         ImGui::EndCombo();
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("  Z S X D C V G B H N J M");
+    ImGui::TextDisabled("  Z S X D C V G B H N J M  (polyphonic!)");
 
     // Draw the keyboard using ImDrawList
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -742,8 +757,8 @@ static void drawPiano(AppState& app)
             int midiNote = PIANO_BASE_NOTE + clickedNote;
             // Trigger note if sound is running
             if (app.sound_running && app.sfx_module) {
-                fm_note_off(app.sfx_module, 0); // release previous
-                fm_note_on(app.sfx_module, midiNote, PIANO_INSTRS[app.pianoInstrument].patchId, 0);
+                fm_voice_id voice = fm_note_on(app.sfx_module, midiNote, PIANO_INSTRS[app.pianoInstrument].patchId, 0);
+                app.pianoVoice[clickedNote] = voice;
             }
             app.pianoHeldNote = midiNote;
         }
@@ -754,8 +769,9 @@ static void drawPiano(AppState& app)
         bool kbHeld = (heldSemi >= 0 && heldSemi < 12) ? app.pianoKeyHeld[heldSemi] : false;
         if (!kbHeld) {
             // Release note if sound is running
-            if (app.sound_running && app.sfx_module) {
-                fm_note_off(app.sfx_module, 0);
+            if (app.sound_running && app.sfx_module && app.pianoVoice[heldSemi] >= 0) {
+                fm_note_off(app.sfx_module, app.pianoVoice[heldSemi]);
+                app.pianoVoice[heldSemi] = -1;
             }
             app.pianoHeldNote = -1;
         }
@@ -801,16 +817,15 @@ static void mainTick()
                 emscripten_cancel_main_loop();
 #endif
             }
-            // Piano keys — trigger notes when sound is running
+            // Piano keys — polyphonic note triggering
             for (int k = 0; k < 12; k++) {
                 if (e.key.keysym.sym == PIANO_KEYS[k]) {
                     app.pianoKeyHeld[k] = true;
                     int midiNote = PIANO_BASE_NOTE + k;
                     if (app.sound_running && app.sfx_module) {
-                        fm_note_off(app.sfx_module, 0); // release previous
-                        fm_note_on(app.sfx_module, midiNote, PIANO_INSTRS[app.pianoInstrument].patchId, 0);
+                        fm_voice_id voice = fm_note_on(app.sfx_module, midiNote, PIANO_INSTRS[app.pianoInstrument].patchId, 0);
+                        app.pianoVoice[k] = voice;
                     }
-                    app.pianoHeldNote = midiNote;
                     break;
                 }
             }
@@ -820,32 +835,10 @@ static void mainTick()
             for (int k = 0; k < 12; k++) {
                 if (sym == PIANO_KEYS[k]) {
                     app.pianoKeyHeld[k] = false;
-                    // Release only if this was the held note and no other key is down
-                    if (app.pianoHeldNote == PIANO_BASE_NOTE + k) {
-                        bool anyHeld = false;
-                        for (int j = 0; j < 12; j++) {
-                            if (app.pianoKeyHeld[j]) { anyHeld = true; break; }
-                        }
-                        if (!anyHeld) {
-                            // Release note if sound is running
-                            if (app.sound_running && app.sfx_module) {
-                                fm_note_off(app.sfx_module, 0);
-                            }
-                            app.pianoHeldNote = -1;
-                        } else {
-                            // Switch to the other held key
-                            for (int j = 0; j < 12; j++) {
-                                if (app.pianoKeyHeld[j]) {
-                                    int midiNote = PIANO_BASE_NOTE + j;
-                                    if (app.sound_running && app.sfx_module) {
-                                        fm_note_off(app.sfx_module, 0);
-                                        fm_note_on(app.sfx_module, midiNote, PIANO_INSTRS[app.pianoInstrument].patchId, 0);
-                                    }
-                                    app.pianoHeldNote = midiNote;
-                                    break;
-                                }
-                            }
-                        }
+                    // Release this specific voice
+                    if (app.sound_running && app.sfx_module && app.pianoVoice[k] >= 0) {
+                        fm_note_off(app.sfx_module, app.pianoVoice[k]);
+                        app.pianoVoice[k] = -1;
                     }
                     break;
                 }
