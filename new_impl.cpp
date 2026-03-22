@@ -102,11 +102,30 @@ public:
         write(0, 0x28, ((ch >= 3) ? 0x04 : 0x00) | (ch % 3));
     }
 
+    // Generate one sample at 44100 Hz reference rate
     void generate(int16_t* L, int16_t* R) {
         ymfm::ym2612::output_data out;
         chip.generate(&out, 1);
         *L = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[0])));
         *R = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[1])));
+    }
+    
+    // Generate 'samples' stereo frames at given sample_rate using Bresenham
+    // to maintain correct pitch at any output rate
+    void generate_buffer(int16_t* stream, int samples, int sample_rate) {
+        static constexpr int REF_RATE = 44100;
+        static int acc_err = 0;
+        
+        for (int i = 0; i < samples; i++) {
+            int16_t L, R;
+            do {
+                generate(&L, &R);
+                acc_err += sample_rate;
+            } while (acc_err < REF_RATE);
+            acc_err -= REF_RATE;
+            stream[i * 2 + 0] = L;
+            stream[i * 2 + 1] = R;
+        }
     }
 };
 
@@ -124,8 +143,24 @@ struct FmVoice {
     int     sfx_id;         // SFX ID if playing SFX, -1 otherwise
 };
 
-// Gap samples before key-on (minimum, per-channel gaps are dynamic)
-static constexpr int MIN_GAP_SAMPLES = 250;
+// Gap calculation helpers - scale by sample rate for consistent timing
+// Base gap is ~5.7ms at 44100Hz, scaled proportionally for other rates
+static inline int get_min_gap_samples(int sample_rate)
+{
+    return (250 * sample_rate) / 44100;
+}
+
+static inline int get_dynamic_gap(int sample_rate, int rows_until_next, int samples_per_row)
+{
+    if (rows_until_next <= 0) return get_min_gap_samples(sample_rate);
+    
+    // Gap = min_gap + (rows * 0.4 * samples_per_row)
+    // This gives ~40% of the time for release, 60% for note sustain
+    int base_gap = get_min_gap_samples(sample_rate);
+    int dynamic_gap = base_gap + (rows_until_next * samples_per_row * 4 / 10);
+    int max_gap = (250 * sample_rate) / 44100;
+    return std::min(max_gap, dynamic_gap);
+}
 
 // SFX pattern event (one row)
 struct FmSfxEvent {
@@ -151,6 +186,7 @@ struct FmActiveSfx {
     int     sample_in_row;  // current sample within row
     int     ticks_remaining; // rows remaining (for duration tracking)
     int     last_patch_id;  // last instrument used
+    int     pending_gap;    // gap samples before key-on (dynamic)
     bool    pending_has_note; // note waiting to be committed
     int     pending_note;   // pending MIDI note
     int     pending_patch_id; // pending patch
@@ -312,12 +348,13 @@ fm_module* fm_module_create(int sample_rate, int buffer_frames, fm_chip_type chi
         m->active_sfx[i].priority = 0;
         m->active_sfx[i].voice_idx = -1;
         m->active_sfx[i].current_row = 0;
-        m->active_sfx[i].sample_in_row = MIN_GAP_SAMPLES;
+        m->active_sfx[i].sample_in_row = get_min_gap_samples(m->sample_rate);
         m->active_sfx[i].ticks_remaining = 0;
         m->active_sfx[i].last_patch_id = -1;
         m->active_sfx[i].pending_has_note = false;
         m->active_sfx[i].pending_note = -1;
         m->active_sfx[i].pending_patch_id = -1;
+        m->active_sfx[i].pending_gap = get_min_gap_samples(m->sample_rate);
         m->active_sfx[i].active = false;
     }
 
@@ -575,66 +612,98 @@ fm_sfx_id fm_sfx_declare(fm_module* m, fm_sfx_id id, const char* pattern_text, i
 // SFX PLAYBACK WITH VOICE STEALING
 // =============================================================================
 
+// Find the next row with a note in an SFX pattern
+static int find_next_sfx_note_row(FmSfxPattern& pat, int start_row)
+{
+    for (int row = start_row + 1; row < pat.num_rows; row++) {
+        if (pat.rows[row].note >= 0) {
+            return row;
+        }
+    }
+    return -1;  // No more notes
+}
+
 // Process a row for an SFX voice (sets up pending note)
 static void sfx_process_row(fm_module* m, int voice_idx, int row_idx)
 {
-    FmActiveSfx& sfx = m->active_sfx[0];  // Find the right slot
+    FmActiveSfx* sfx = nullptr;
     for (int slot = 0; slot < 6; slot++) {
         if (m->active_sfx[slot].voice_idx == voice_idx) {
-            sfx = m->active_sfx[slot];
+            sfx = &m->active_sfx[slot];
             break;
         }
     }
-    
-    FmSfxPattern& pat = m->sfx_patterns[sfx.sfx_id];
+    if (!sfx) return;
+
+    FmSfxPattern& pat = m->sfx_patterns[sfx->sfx_id];
     if (row_idx >= pat.num_rows) return;
-    
+
     FmSfxEvent& ev = pat.rows[row_idx];
-    
+
     // Update last known patch
     if (ev.patch_id >= 0) {
-        sfx.last_patch_id = ev.patch_id;
+        sfx->last_patch_id = ev.patch_id;
     }
-    
+
     // Handle note
-    sfx.pending_has_note = false;
+    sfx->pending_has_note = false;
     if (ev.note == -2) {
         // OFF note - key off
         m->chip->key_off(voice_idx);
     } else if (ev.note >= 0) {
-        // New note - prepare for key-on after gap
+        // New note - key off immediately
         m->chip->key_off(voice_idx);
-        sfx.pending_has_note = true;
-        sfx.pending_note = ev.note;
-        sfx.pending_patch_id = (ev.patch_id >= 0) ? ev.patch_id : sfx.last_patch_id;
+        
+        // Look ahead to find next note
+        int next_note_row = find_next_sfx_note_row(pat, row_idx);
+        if (next_note_row >= 0) {
+            // Calculate dynamic gap based on distance to next note
+            int rows_until_next = next_note_row - row_idx;
+            sfx->pending_gap = get_dynamic_gap(m->sample_rate, rows_until_next, pat.samples_per_row);
+        } else {
+            // No next note - use default gap
+            sfx->pending_gap = get_min_gap_samples(m->sample_rate);
+        }
+        
+        sfx->pending_has_note = true;
+        sfx->pending_note = ev.note;
+        sfx->pending_patch_id = (ev.patch_id >= 0) ? ev.patch_id : sfx->last_patch_id;
     }
 }
 
 // Commit pending note (after gap samples)
-static void sfx_commit_keyon(fm_module* m, int voice_idx)
+static void sfx_commit_keyon(fm_module* m, int voice_idx, int current_gap)
 {
     // Find the active SFX for this voice
     for (int slot = 0; slot < 6; slot++) {
         FmActiveSfx& sfx = m->active_sfx[slot];
         if (!sfx.active || sfx.voice_idx != voice_idx) continue;
-        
+
         if (!sfx.pending_has_note) return;
         if (sfx.pending_patch_id < 0) return;
         if (!m->patch_present[sfx.pending_patch_id]) return;
         
+        // Check if gap has elapsed
+        if (current_gap < sfx.pending_gap) return;
+
+        // Key off first to ensure clean retrigger
+        m->chip->key_off(voice_idx);
+        m->channel_active[voice_idx] = false;
+
         // Load patch
         m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
         m->current_patch[voice_idx] = sfx.pending_patch_id;
-        
+
         // Set frequency and key on
         double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
         m->chip->set_frequency(voice_idx, hz, 0);
         m->chip->key_on(voice_idx);
         m->voices[voice_idx].midi_note = sfx.pending_note;
         m->channel_active[voice_idx] = true;
-        
+
         // Clear pending
         sfx.pending_has_note = false;
+        sfx.pending_gap = get_min_gap_samples(m->sample_rate);
         return;
     }
 }
@@ -720,7 +789,7 @@ fm_voice_id fm_sfx_play(fm_module* m, fm_sfx_id id, int priority)
     sfx.priority = priority;
     sfx.voice_idx = best_voice;
     sfx.current_row = 0;
-    sfx.sample_in_row = MIN_GAP_SAMPLES;  // Start after gap
+    sfx.sample_in_row = get_min_gap_samples(m->sample_rate);  // Start after gap
     sfx.ticks_remaining = pat.num_rows;
     sfx.last_patch_id = -1;
     sfx.pending_has_note = false;
@@ -736,13 +805,16 @@ fm_voice_id fm_sfx_play(fm_module* m, fm_sfx_id id, int priority)
     m->voices[best_voice].midi_note = -1;
     m->voices[best_voice].patch_id = -1;
     m->channel_active[best_voice] = false;
-    
+
+    // Initialize pending gap
+    sfx.pending_gap = get_min_gap_samples(m->sample_rate);
+
     // Process first row immediately (sets up pending note)
     sfx_process_row(m, best_voice, 0);
-    
+
     // Commit key-on immediately (we're already past the gap)
-    sfx_commit_keyon(m, best_voice);
-    
+    sfx_commit_keyon(m, best_voice, sfx.sample_in_row);
+
     return best_voice;
 }
 
@@ -760,12 +832,12 @@ static void update_sfx_voice(fm_module* m, int slot)
     
     // Advance sample counter
     sfx.sample_in_row++;
-    
+
     // Check if we've crossed the gap boundary - commit key-on
-    if (sfx.sample_in_row == MIN_GAP_SAMPLES && sfx.pending_has_note) {
-        sfx_commit_keyon(m, voice);
+    if (sfx.pending_has_note) {
+        sfx_commit_keyon(m, voice, sfx.sample_in_row);
     }
-    
+
     // Check if we've reached end of row
     if (sfx.sample_in_row >= pat.samples_per_row) {
         sfx.sample_in_row = 0;
@@ -973,7 +1045,7 @@ static void song_process_row(fm_module* m, int row_idx)
             m->channel_active[ch] = false;
             ch_state.pending_has_note = false;
             ch_state.pending_is_off = true;
-            ch_state.pending_gap = MIN_GAP_SAMPLES;
+            ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
         } else if (ev.note >= 0) {
             // New note - key off immediately to stop previous note
             m->chip->key_off(ch);
@@ -990,10 +1062,10 @@ static void song_process_row(fm_module* m, int row_idx)
                 // More distance = longer gap for release
                 int rows_until_next = next_note_row - row_idx;
                 // Use 44 + (rows * 10) samples, capped at 250
-                ch_state.pending_gap = std::min(250, MIN_GAP_SAMPLES + (rows_until_next * 10));
+                ch_state.pending_gap = get_dynamic_gap(m->sample_rate, rows_until_next, pat.samples_per_row);
             } else {
                 // No next note - use default gap
-                ch_state.pending_gap = MIN_GAP_SAMPLES;
+                ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
             }
             
             // Mark for key-on after gap
@@ -1055,7 +1127,7 @@ static void song_commit_keyon(fm_module* m, int current_gap)
         // Clear pending state completely
         ch_state.pending_has_note = false;
         ch_state.pending_is_off = false;
-        ch_state.pending_gap = MIN_GAP_SAMPLES;
+        ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
     }
 }
 
@@ -1089,7 +1161,7 @@ void fm_song_play(fm_module* m, fm_song_id id, bool loop)
         m->active_song.channels[ch].current_volume = 127;
         m->active_song.channels[ch].pending_has_note = false;
         m->active_song.channels[ch].pending_is_off = false;
-        m->active_song.channels[ch].pending_gap = MIN_GAP_SAMPLES;
+        m->active_song.channels[ch].pending_gap = get_min_gap_samples(m->sample_rate);
     }
 
     // Process first row (sets up pending notes - will be triggered in update_song)
@@ -1314,20 +1386,14 @@ void fm_mix(fm_module* m, int16_t* stream, int frames)
     update_song(m, frames);
     update_sfx(m, frames);
 
-    // SYNTH mode: generate from chip
-    // Note: chip generates at 44100 Hz internally
-    // We need to handle sample rate conversion if needed
-    for (int i = 0; i < frames; i++) {
-        int16_t L, R;
-        m->chip->generate(&L, &R);
+    // SYNTH mode: generate from chip using Bresenham for correct pitch
+    m->chip->generate_buffer(stream, frames, m->sample_rate);
 
-        // Apply volume
-        float vol = m->volume;
-        L = static_cast<int16_t>(L * vol);
-        R = static_cast<int16_t>(R * vol);
-
-        // Write to interleaved stereo buffer
-        stream[i * 2 + 0] = L;
-        stream[i * 2 + 1] = R;
+    // Apply volume
+    float vol = m->volume;
+    if (vol < 1.0f) {
+        for (int i = 0; i < frames * 2; i++) {
+            stream[i] = static_cast<int16_t>(stream[i] * vol);
+        }
     }
 }
