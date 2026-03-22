@@ -1,7 +1,7 @@
 
 /**
  * =============================================================================
- * ingamefm.h — Modular FM Synthesis & Cached Playback Library (C99)
+ * ingamefm.h — Modular FM Synthesis Library (C99)
  * =============================================================================
  *
  * A modular FM audio system for games and demos.
@@ -23,34 +23,9 @@
  * • Each module has:
  *     - One chip type
  *     - One scheduler mode (SONG or SFX)
- *     - One playback mode (SYNTH / RECORD / CACHE)
  *
  * • Assets:
  *     - SYNTH (Furnace patterns)
- *     - CACHE (PCM buffers, client-owned)
- *
- * • RECORD mode:
- *     - Synth plays normally
- *     - Cache buffers are filled progressively
- *
- * • CACHE mode:
- *     - No chip required
- *     - Unlimited SFX playback
- *     - No note triggering / chip control
- *
- * -----------------------------------------------------------------------------
- * 📦 CACHE FORMAT (VARIABLE ROW LENGTHS)
- * -----------------------------------------------------------------------------
- *
- * A "row" = one tracker step.
- *
- * Due to fractional timing:
- *   sample_rate / (ticks * speed) is NOT integer.
- *
- * Therefore:
- *   • Each row may contain a VARIABLE number of samples
- *   • Cache playback MUST follow row boundaries exactly
- *   • This ensures perfect sync with SYNTH mode
  *
  * -----------------------------------------------------------------------------
  */
@@ -210,12 +185,6 @@ typedef enum {
  * ============================================================================= */
 
 typedef enum {
-    FM_MODE_SYNTH = 0,
-    FM_MODE_RECORD,
-    FM_MODE_CACHE
-} fm_mode;
-
-typedef enum {
     FM_SCHED_SONG = 0,
     FM_SCHED_SFX
 } fm_sched_mode;
@@ -241,14 +210,6 @@ fm_module* fm_module_create(
  * Destroy module.
  */
 void fm_module_destroy(fm_module* m);
-
-/**
- * Set playback mode.
- *
- * RULE:
- *   FM_MODE_CACHE is allowed ONLY if all declared assets are cached.
- */
-bool fm_module_set_mode(fm_module* m, fm_mode mode);
 
 /**
  * Set scheduler mode (init-time only).
@@ -464,9 +425,7 @@ fm_voice_id fm_sfx_play(
 );
 
 /**
- * Trigger note (SYNTH only).
- *
- * Returns FM_VOICE_INVALID in CACHE mode.
+ * Trigger note.
  */
 fm_voice_id fm_note_on(
     fm_module* m,

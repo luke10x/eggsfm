@@ -266,11 +266,10 @@ struct fm_module {
     int             sample_rate;
     int             buffer_frames;
     fm_chip_type    chip_type;
-    fm_mode         mode;
     fm_sched_mode   sched_mode;
     float           volume;
 
-    // OPN chip instance (only for SYNTH and RECORD modes)
+    // OPN chip instance
     FmChipOpn*      chip;
 
     // Patch storage (up to 256 patches)
@@ -330,7 +329,6 @@ fm_module* fm_module_create(int sample_rate, int buffer_frames, fm_chip_type chi
     m->sample_rate   = sample_rate;
     m->buffer_frames = buffer_frames;
     m->chip_type     = chip_type;
-    m->mode          = FM_MODE_SYNTH;
     m->sched_mode    = FM_SCHED_SONG;
     m->volume        = 1.0f;
     m->chip          = new (std::nothrow) FmChipOpn;
@@ -412,21 +410,6 @@ void fm_module_destroy(fm_module* m)
     if (!m) return;
     delete m->chip;
     delete m;
-}
-
-bool fm_module_set_mode(fm_module* m, fm_mode mode)
-{
-    if (!m) return false;
-
-    // RULE: FM_MODE_CACHE is allowed ONLY if all declared assets are cached.
-    // For now, we allow it but client must ensure patches are loaded.
-    if (mode == FM_MODE_CACHE) {
-        // In cache mode, chip is not needed
-        // Future: verify all songs/SFX are cached before allowing
-    }
-
-    m->mode = mode;
-    return true;
 }
 
 void fm_module_set_scheduler(fm_module* m, fm_sched_mode mode)
@@ -753,7 +736,6 @@ static void sfx_commit_keyon(fm_module* m, int voice_idx, int current_gap)
 fm_voice_id fm_sfx_play(fm_module* m, fm_sfx_id id, int priority)
 {
     if (!m || !m->chip) return FM_VOICE_INVALID;
-    if (m->mode == FM_MODE_CACHE) return FM_VOICE_INVALID;
     if (id < 0 || id > 255) return FM_VOICE_INVALID;
     if (!m->sfx_present[id]) return FM_VOICE_INVALID;
     
@@ -1358,7 +1340,6 @@ static int allocate_voice(fm_module* m)
 fm_voice_id fm_note_on(fm_module* m, int midi_note, fm_patch_id patch_id, int velocity)
 {
     if (!m || !m->chip) return FM_VOICE_INVALID;
-    if (m->mode == FM_MODE_CACHE) return FM_VOICE_INVALID;
 
     // Validate patch
     if (patch_id < 0 || patch_id > 255) return FM_VOICE_INVALID;
@@ -1419,15 +1400,7 @@ void fm_mix(fm_module* m, int16_t* stream, int frames)
 {
     if (!m) return;
 
-    // In CACHE mode, we would mix from cache buffer
-    // For now, only SYNTH mode is implemented
-    if (m->mode == FM_MODE_CACHE) {
-        // Future: mix from cache buffer
-        std::memset(stream, 0, frames * 2 * sizeof(int16_t));
-        return;
-    }
-
-    // In SYNTH mode, chip must exist
+    // Chip must exist
     if (!m->chip) {
         std::memset(stream, 0, frames * 2 * sizeof(int16_t));
         return;
