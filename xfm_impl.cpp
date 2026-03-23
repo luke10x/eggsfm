@@ -1,16 +1,16 @@
 // =============================================================================
-// new_impl.cpp — Implementation of the new ingamefm API (C99 interface)
+// xfm_impl.cpp — Implementation of the new eggsfm API (C99 interface)
 // =============================================================================
 //
 // Architecture:
-//   - Client creates two fm_module instances: one for music, one for SFX
+//   - Client creates two xfm_module instances: one for music, one for SFX
 //   - Each module owns its own YM2612 chip instance
-//   - Audio mixing is done by client calling fm_mix() from SDL callback
+//   - Audio mixing is done by client calling xfm_mix() from SDL callback
 //   - Patches are chip-specific (OPN for now, OPM/OPL extensible later)
 //
 // =============================================================================
 
-#include "new_api.h"
+#include "xfm_api.h"
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -21,10 +21,10 @@
 #include "ymfm_opn.h"
 
 // =============================================================================
-// YM2612 Chip Wrapper (same as old IngameFMChip, standalone)
+// YM2612 Chip Wrapper (same as old EggsFMChip, standalone)
 // =============================================================================
 
-class FmChipOpn
+class XfmChipOpn
 {
 public:
     static constexpr uint32_t YM_CLOCK = 7670453;
@@ -40,7 +40,7 @@ public:
     Interface intf;
     ymfm::ym2612 chip;
 
-    FmChipOpn() : chip(intf) { chip.reset(); }
+    XfmChipOpn() : chip(intf) { chip.reset(); }
 
     void write(uint8_t port, uint8_t reg, uint8_t val) {
         uint8_t addr = port * 2;
@@ -48,7 +48,7 @@ public:
         chip.write(addr+1, val);
     }
 
-    void load_patch(const fm_patch_opn& p, int ch) {
+    void load_patch(const xfm_patch_opn& p, int ch) {
         // YM2612 slot order in registers: OP1, OP3, OP2, OP4
         // Patch array order:              OP1, OP2, OP3, OP4
         const int slotMap[4] = { 0, 2, 1, 3 };
@@ -147,7 +147,7 @@ public:
 // =============================================================================
 
 // Voice state for polyphonic playback
-struct FmVoice {
+struct XfmVoice {
     int     midi_note;      // current MIDI note, -1 if free
     int     patch_id;       // current patch
     bool    active;         // voice is sounding
@@ -184,22 +184,22 @@ static inline int get_dynamic_gap(int sample_rate, int rows_until_next, int samp
 }
 
 // SFX pattern event (one row)
-struct FmSfxEvent {
+struct XfmSfxEvent {
     int     note;           // MIDI note, -1 = none, -2 = off
     int     patch_id;       // patch/instrument ID, -1 = inherit
 };
 
 // SFX pattern
-struct FmSfxPattern {
+struct XfmSfxPattern {
     int             num_rows;
     int             tick_rate;
     int             speed;
     int             samples_per_row;
-    FmSfxEvent*     rows;     // array of num_rows events
+    XfmSfxEvent*     rows;     // array of num_rows events
 };
 
 // Active SFX voice tracking
-struct FmActiveSfx {
+struct XfmActiveSfx {
     int     sfx_id;         // which SFX is playing
     int     priority;       // priority level
     int     voice_idx;      // which voice it's using
@@ -215,14 +215,14 @@ struct FmActiveSfx {
 };
 
 // Song channel event
-struct FmSongEvent {
+struct XfmSongEvent {
     int     note;           // MIDI note, -1 = none, -2 = off
     int     patch_id;       // patch/instrument ID, -1 = inherit
     int     volume;         // volume 0-127, -1 = inherit
 };
 
 // Song channel state
-struct FmSongChannel {
+struct XfmSongChannel {
     int             current_patch;
     int             current_volume;
     int             pending_note;
@@ -234,66 +234,65 @@ struct FmSongChannel {
 };
 
 // Song pattern (multi-channel)
-struct FmSongPattern {
+struct XfmSongPattern {
     int             num_rows;
     int             num_channels;
     int             tick_rate;
     int             speed;
     int             samples_per_row;
-    FmSongEvent**   rows;     // array of num_rows, each is array of num_channels events
+    XfmSongEvent**   rows;     // array of num_rows, each is array of num_channels events
 };
 
 // Active song tracking
-struct FmActiveSong {
+struct XfmActiveSong {
     int             song_id;
     int             current_row;
     int             sample_in_row;
     int             ticks_remaining;  // for loop tracking
     bool            active;
     bool            loop;
-    FmSongChannel   channels[6];
+    XfmSongChannel   channels[6];
 };
 
 // Pending song change
-struct FmPendingSong {
+struct XfmPendingSong {
     int                 song_id;
-    fm_song_switch_timing timing;
+    xfm_song_switch_timing timing;
     bool                pending;
 };
 
-struct fm_module {
+struct xfm_module {
     // Configuration
     int             sample_rate;
     int             buffer_frames;
-    fm_chip_type    chip_type;
-    fm_sched_mode   sched_mode;
+    xfm_chip_type    chip_type;
     float           volume;
 
     // OPN chip instance
-    FmChipOpn*      chip;
+    XfmChipOpn*      chip;
 
     // Patch storage (up to 256 patches)
-    fm_patch_opn    patches[256];
+    xfm_patch_opn    patches[256];
     bool            patch_present[256];
 
     // Voice pool (6 voices for OPN)
-    FmVoice         voices[6];
+    XfmVoice         voices[6];
     int             voice_age_counter;
 
     // SFX patterns (up to 256 SFX definitions)
-    FmSfxPattern    sfx_patterns[256];
+    XfmSfxPattern    sfx_patterns[256];
     bool            sfx_present[256];
 
     // Active SFX tracking (up to 6 concurrent SFX, one per voice)
-    FmActiveSfx     active_sfx[6];
+    XfmActiveSfx     active_sfx[6];
 
     // Song patterns (up to 16 songs)
-    FmSongPattern   song_patterns[16];
+    XfmSongPattern   song_patterns[16];
     bool            song_present[16];
 
     // Active song
-    FmActiveSong    active_song;
-    FmPendingSong   pending_song;
+    XfmActiveSong    active_song;
+    XfmPendingSong   pending_song;
 
     // Channel state tracking
     int             current_patch[6];
@@ -304,34 +303,33 @@ struct fm_module {
     int             lfo_freq;
 
     // Note: For future OPM/OPL support, we would:
-    //   - Add union { FmChipOpn* opn; FmChipOpm* opm; FmChipOpl* opl; }
+    //   - Add union { XfmChipOpn* opn; XfmChipOpm* opm; XfmChipOpl* opl; }
     //   - Switch on chip_type in all chip operations
-    //   - Add patch format validation in fm_patch_set()
+    //   - Add patch format validation in xfm_patch_set()
 };
 
 // =============================================================================
 // MODULE LIFETIME
 // =============================================================================
 
-fm_module* fm_module_create(int sample_rate, int buffer_frames, fm_chip_type chip_type)
+xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type chip_type)
 {
     // For now, only YM2612 and YM3438 are supported
     if (chip_type != FM_CHIP_YM2612 && chip_type != FM_CHIP_YM3438) {
         // Future: allocate appropriate chip type
-        // case FM_CHIP_OPM: chip = new FmChipOpm(); break;
-        // case FM_CHIP_OPL2: chip = new FmChipOpl2(); break;
+        // case FM_CHIP_OPM: chip = new XfmChipOpm(); break;
+        // case FM_CHIP_OPL2: chip = new XfmChipOpl2(); break;
         return nullptr;
     }
 
-    fm_module* m = new (std::nothrow) fm_module;
+    xfm_module* m = new (std::nothrow) xfm_module;
     if (!m) return nullptr;
 
     m->sample_rate   = sample_rate;
     m->buffer_frames = buffer_frames;
     m->chip_type     = chip_type;
-    m->sched_mode    = FM_SCHED_SONG;
     m->volume        = 1.0f;
-    m->chip          = new (std::nothrow) FmChipOpn;
+    m->chip          = new (std::nothrow) XfmChipOpn;
     m->lfo_enable    = false;
     m->lfo_freq      = 0;
     m->voice_age_counter = 0;
@@ -405,34 +403,20 @@ fm_module* fm_module_create(int sample_rate, int buffer_frames, fm_chip_type chi
     return m;
 }
 
-void fm_module_destroy(fm_module* m)
+void xfm_module_destroy(xfm_module* m)
 {
     if (!m) return;
     delete m->chip;
     delete m;
 }
 
-void fm_module_set_scheduler(fm_module* m, fm_sched_mode mode)
-{
-    if (!m) return;
-    m->sched_mode = mode;
-}
-
-void fm_module_set_volume(fm_module* m, float volume)
+void xfm_module_set_volume(xfm_module* m, float volume)
 {
     if (!m) return;
     m->volume = std::max(0.0f, std::min(1.0f, volume));
 }
 
-void fm_module_set_clock(fm_module* m, int clock_hz)
-{
-    // For OPN, clock is fixed at 7670453 Hz
-    // This could be used for future chips with different clocks
-    (void)m;
-    (void)clock_hz;
-}
-
-void fm_module_set_lfo(fm_module* m, bool enable, int freq)
+void xfm_module_set_lfo(xfm_module* m, bool enable, int freq)
 {
     if (!m || !m->chip) return;
     m->lfo_enable = enable;
@@ -444,8 +428,8 @@ void fm_module_set_lfo(fm_module* m, bool enable, int freq)
 // PATCH SYSTEM
 // =============================================================================
 
-void fm_patch_set(fm_module* m, fm_patch_id patch_id, const void* patch_data,
-                  int patch_size, fm_chip_type patch_type)
+void xfm_patch_set(xfm_module* m, xfm_patch_id patch_id, const void* patch_data,
+                  int patch_size, xfm_chip_type patch_type)
 {
     if (!m || !patch_data || patch_id < 0 || patch_id > 255) return;
 
@@ -454,32 +438,12 @@ void fm_patch_set(fm_module* m, fm_patch_id patch_id, const void* patch_data,
     if (m->chip_type != FM_CHIP_YM2612 && m->chip_type != FM_CHIP_YM3438) return;
 
     // Validate size
-    if (patch_size != sizeof(fm_patch_opn)) return;
+    if (patch_size != sizeof(xfm_patch_opn)) return;
 
-    m->patches[patch_id] = *static_cast<const fm_patch_opn*>(patch_data);
+    m->patches[patch_id] = *static_cast<const xfm_patch_opn*>(patch_data);
     m->patch_present[patch_id] = true;
 }
 
-void fm_patch_set_song_channel(fm_module* m, fm_song_id song, int channel,
-                               fm_patch_id patch_id)
-{
-    // For now, we just assign patch to channel
-    // Future: this will be used by song scheduler
-    if (!m || channel < 0 || channel > 5) return;
-    if (patch_id >= 0 && patch_id <= 255 && m->patch_present[patch_id]) {
-        m->current_patch[channel] = patch_id;
-        m->chip->load_patch(m->patches[patch_id], channel);
-    }
-}
-
-void fm_patch_set_sfx(fm_module* m, fm_sfx_id sfx, fm_patch_id patch_id)
-{
-    // SFX patches are assigned when sfx_play is called
-    // This is a placeholder for future SFX system
-    (void)m;
-    (void)sfx;
-    (void)patch_id;
-}
 
 // =============================================================================
 // SFX PATTERN PARSER
@@ -526,7 +490,7 @@ static int parse_hex2(const char* p) {
     return h0 * 16 + h1;
 }
 
-fm_sfx_id fm_sfx_declare(fm_module* m, fm_sfx_id id, const char* pattern_text, int tick_rate, int speed)
+xfm_sfx_id xfm_sfx_declare(xfm_module* m, xfm_sfx_id id, const char* pattern_text, int tick_rate, int speed)
 {
     if (!m || !pattern_text || tick_rate <= 0 || speed <= 0) return -1;
     if (id < 0 || id > 255) return -1;
@@ -549,7 +513,7 @@ fm_sfx_id fm_sfx_declare(fm_module* m, fm_sfx_id id, const char* pattern_text, i
     if (*p == '\n') p++;
     
     // Allocate and parse rows
-    FmSfxPattern& pat = m->sfx_patterns[id];
+    XfmSfxPattern& pat = m->sfx_patterns[id];
     pat.num_rows = num_rows;
     pat.tick_rate = tick_rate;
     pat.speed = speed;
@@ -559,13 +523,13 @@ fm_sfx_id fm_sfx_declare(fm_module* m, fm_sfx_id id, const char* pattern_text, i
     if (pat.rows) {
         delete[] pat.rows;
     }
-    pat.rows = new FmSfxEvent[num_rows];
+    pat.rows = new XfmSfxEvent[num_rows];
     
     int last_note = -1;
     int last_inst = -1;
     
     for (int row = 0; row < num_rows; row++) {
-        FmSfxEvent& ev = pat.rows[row];
+        XfmSfxEvent& ev = pat.rows[row];
         ev.note = -1;
         ev.patch_id = -1;
         
@@ -619,7 +583,7 @@ fm_sfx_id fm_sfx_declare(fm_module* m, fm_sfx_id id, const char* pattern_text, i
 // =============================================================================
 
 // Find the next row with a note in an SFX pattern
-static int find_next_sfx_note_row(FmSfxPattern& pat, int start_row)
+static int find_next_sfx_note_row(XfmSfxPattern& pat, int start_row)
 {
     for (int row = start_row + 1; row < pat.num_rows; row++) {
         if (pat.rows[row].note >= 0) {
@@ -630,9 +594,9 @@ static int find_next_sfx_note_row(FmSfxPattern& pat, int start_row)
 }
 
 // Process a row for an SFX voice (sets up pending note)
-static void sfx_process_row(fm_module* m, int voice_idx, int row_idx)
+static void sfx_process_row(xfm_module* m, int voice_idx, int row_idx)
 {
-    FmActiveSfx* sfx = nullptr;
+    XfmActiveSfx* sfx = nullptr;
     for (int slot = 0; slot < 6; slot++) {
         if (m->active_sfx[slot].voice_idx == voice_idx) {
             sfx = &m->active_sfx[slot];
@@ -641,10 +605,10 @@ static void sfx_process_row(fm_module* m, int voice_idx, int row_idx)
     }
     if (!sfx) return;
 
-    FmSfxPattern& pat = m->sfx_patterns[sfx->sfx_id];
+    XfmSfxPattern& pat = m->sfx_patterns[sfx->sfx_id];
     if (row_idx >= pat.num_rows) return;
 
-    FmSfxEvent& ev = pat.rows[row_idx];
+    XfmSfxEvent& ev = pat.rows[row_idx];
 
     // Update last known patch
     if (ev.patch_id >= 0) {
@@ -690,11 +654,11 @@ static void sfx_process_row(fm_module* m, int voice_idx, int row_idx)
 }
 
 // Commit pending note (after gap samples)
-static void sfx_commit_keyon(fm_module* m, int voice_idx, int current_gap)
+static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
 {
     // Find the active SFX for this voice
     for (int slot = 0; slot < 6; slot++) {
-        FmActiveSfx& sfx = m->active_sfx[slot];
+        XfmActiveSfx& sfx = m->active_sfx[slot];
         if (!sfx.active || sfx.voice_idx != voice_idx) continue;
 
         if (!sfx.pending_has_note) return;
@@ -733,13 +697,13 @@ static void sfx_commit_keyon(fm_module* m, int voice_idx, int current_gap)
     }
 }
 
-fm_voice_id fm_sfx_play(fm_module* m, fm_sfx_id id, int priority)
+xfm_voice_id xfm_sfx_play(xfm_module* m, xfm_sfx_id id, int priority)
 {
     if (!m || !m->chip) return FM_VOICE_INVALID;
     if (id < 0 || id > 255) return FM_VOICE_INVALID;
     if (!m->sfx_present[id]) return FM_VOICE_INVALID;
     
-    FmSfxPattern& pat = m->sfx_patterns[id];
+    XfmSfxPattern& pat = m->sfx_patterns[id];
     if (!pat.rows || pat.num_rows <= 0) return FM_VOICE_INVALID;
     
     // Find a voice to use for this SFX
@@ -808,7 +772,7 @@ fm_voice_id fm_sfx_play(fm_module* m, fm_sfx_id id, int priority)
     if (slot < 0) return FM_VOICE_INVALID;  // No free SFX slots (should not happen)
     
     // Initialize the SFX
-    FmActiveSfx& sfx = m->active_sfx[slot];
+    XfmActiveSfx& sfx = m->active_sfx[slot];
     sfx.sfx_id = id;
     sfx.priority = priority;
     sfx.voice_idx = best_voice;
@@ -842,16 +806,16 @@ fm_voice_id fm_sfx_play(fm_module* m, fm_sfx_id id, int priority)
     return best_voice;
 }
 
-// Internal: Update active SFX voices (called from fm_mix each frame)
+// Internal: Update active SFX voices (called from xfm_mix each frame)
 // Advances SFX by 1 sample. Call this in a loop for each sample in the buffer.
-static void update_sfx_voice(fm_module* m, int slot)
+static void update_sfx_voice(xfm_module* m, int slot)
 {
-    FmActiveSfx& sfx = m->active_sfx[slot];
+    XfmActiveSfx& sfx = m->active_sfx[slot];
     if (!sfx.active) return;
     if (sfx.ticks_remaining <= 0) return;
     if (sfx.voice_idx < 0 || sfx.voice_idx >= 6) return;
     
-    FmSfxPattern& pat = m->sfx_patterns[sfx.sfx_id];
+    XfmSfxPattern& pat = m->sfx_patterns[sfx.sfx_id];
     int voice = sfx.voice_idx;
     
     // Advance sample counter
@@ -891,7 +855,7 @@ static void update_sfx_voice(fm_module* m, int slot)
 }
 
 // Update all SFX voices by a given number of samples
-static void update_sfx(fm_module* m, int num_samples)
+static void update_sfx(xfm_module* m, int num_samples)
 {
     for (int i = 0; i < num_samples; i++) {
         for (int slot = 0; slot < 6; slot++) {
@@ -904,7 +868,7 @@ static void update_sfx(fm_module* m, int num_samples)
 // SONG PATTERN PARSER (multi-channel)
 // =============================================================================
 
-fm_song_id fm_song_declare(fm_module* m, fm_song_id id, const char* pattern_text,
+xfm_song_id xfm_song_declare(xfm_module* m, xfm_song_id id, const char* pattern_text,
                            int tick_rate, int speed)
 {
     if (!m || !pattern_text || tick_rate <= 0 || speed <= 0) return -1;
@@ -942,7 +906,7 @@ fm_song_id fm_song_declare(fm_module* m, fm_song_id id, const char* pattern_text
     p = row_start;
     
     // Allocate and parse song
-    FmSongPattern& song = m->song_patterns[id];
+    XfmSongPattern& song = m->song_patterns[id];
     song.num_rows = num_rows;
     song.num_channels = num_channels;
     song.tick_rate = tick_rate;
@@ -957,9 +921,9 @@ fm_song_id fm_song_declare(fm_module* m, fm_song_id id, const char* pattern_text
         delete[] song.rows;
     }
 
-    song.rows = new FmSongEvent*[num_rows];
+    song.rows = new XfmSongEvent*[num_rows];
     for (int r = 0; r < num_rows; r++) {
-        song.rows[r] = new FmSongEvent[num_channels];
+        song.rows[r] = new XfmSongEvent[num_channels];
     }
 
     // Parse each row - p is already at start of first data row
@@ -971,7 +935,7 @@ fm_song_id fm_song_declare(fm_module* m, fm_song_id id, const char* pattern_text
         if (!*p || *p == '\0') break;
         
         for (int ch = 0; ch < num_channels; ch++) {
-            FmSongEvent& ev = song.rows[row][ch];
+            XfmSongEvent& ev = song.rows[row][ch];
             ev.note = -1;       // -1 = no note (keep playing)
             ev.patch_id = -1;   // -1 = inherit instrument
             ev.volume = -1;     // -1 = inherit volume
@@ -1034,7 +998,7 @@ fm_song_id fm_song_declare(fm_module* m, fm_song_id id, const char* pattern_text
 }
 
 // Find the next row with a note on a given channel
-static int find_next_note_row(FmSongPattern& pat, int start_row, int ch)
+static int find_next_note_row(XfmSongPattern& pat, int start_row, int ch)
 {
     for (int row = start_row + 1; row < pat.num_rows; row++) {
         if (pat.rows[row][ch].note >= 0) {
@@ -1045,19 +1009,19 @@ static int find_next_note_row(FmSongPattern& pat, int start_row, int ch)
 }
 
 // Process a row for the active song - called at END of previous row
-static void song_process_row(fm_module* m, int row_idx)
+static void song_process_row(xfm_module* m, int row_idx)
 {
-    FmActiveSong& song = m->active_song;
+    XfmActiveSong& song = m->active_song;
     if (song.song_id <= 0 || song.song_id > 15) return;
     if (!m->song_present[song.song_id]) return;
 
-    FmSongPattern& pat = m->song_patterns[song.song_id];
+    XfmSongPattern& pat = m->song_patterns[song.song_id];
     if (row_idx >= pat.num_rows) return;
 
     // Process each channel
     for (int ch = 0; ch < pat.num_channels && ch < 6; ch++) {
-        FmSongEvent& ev = pat.rows[row_idx][ch];
-        FmSongChannel& ch_state = song.channels[ch];
+        XfmSongEvent& ev = pat.rows[row_idx][ch];
+        XfmSongChannel& ch_state = song.channels[ch];
 
         // Update instrument and volume if specified
         if (ev.patch_id >= 0) ch_state.current_patch = ev.patch_id;
@@ -1116,13 +1080,13 @@ static void song_process_row(fm_module* m, int row_idx)
 }
 
 // Commit pending notes for active song (after gap samples)
-static void song_commit_keyon(fm_module* m, int current_gap)
+static void song_commit_keyon(xfm_module* m, int current_gap)
 {
-    FmActiveSong& song = m->active_song;
+    XfmActiveSong& song = m->active_song;
     if (song.song_id <= 0 || song.song_id > 15) return;
 
     for (int ch = 0; ch < 6; ch++) {
-        FmSongChannel& ch_state = song.channels[ch];
+        XfmSongChannel& ch_state = song.channels[ch];
         if (!ch_state.pending_has_note) continue;
         if (ch_state.pending_patch < 0) continue;
         if (!m->patch_present[ch_state.pending_patch]) continue;
@@ -1130,7 +1094,7 @@ static void song_commit_keyon(fm_module* m, int current_gap)
         // If gap is 0, key on immediately (fast passage)
         if (ch_state.pending_gap == 0) {
             // Load patch and key on immediately
-            fm_patch_opn patch = m->patches[ch_state.pending_patch];
+            xfm_patch_opn patch = m->patches[ch_state.pending_patch];
             int tl_add = ((0x7F - ch_state.current_volume) * 127) / 0x7F;
             bool isCarrier[4] = {false, false, false, false};
             switch(patch.ALG) {
@@ -1160,7 +1124,7 @@ static void song_commit_keyon(fm_module* m, int current_gap)
         }
 
         // Gap elapsed - load patch and key on new note
-        fm_patch_opn patch = m->patches[ch_state.pending_patch];
+        xfm_patch_opn patch = m->patches[ch_state.pending_patch];
         int tl_add = ((0x7F - ch_state.current_volume) * 127) / 0x7F;
         bool isCarrier[4] = {false, false, false, false};
         switch(patch.ALG) {
@@ -1187,13 +1151,13 @@ static void song_commit_keyon(fm_module* m, int current_gap)
 }
 
 // Start a song
-void fm_song_play(fm_module* m, fm_song_id id, bool loop)
+void xfm_song_play(xfm_module* m, xfm_song_id id, bool loop)
 {
     if (!m || !m->chip) return;
     if (id <= 0 || id > 15) return;
     if (!m->song_present[id]) return;
 
-    FmSongPattern& pat = m->song_patterns[id];
+    XfmSongPattern& pat = m->song_patterns[id];
 
     // Stop current song and reset all channels
     for (int ch = 0; ch < 6; ch++) {
@@ -1224,7 +1188,7 @@ void fm_song_play(fm_module* m, fm_song_id id, bool loop)
 }
 
 // Schedule song change
-void fm_song_schedule(fm_module* m, fm_song_id id, fm_song_switch_timing timing)
+void xfm_song_schedule(xfm_module* m, xfm_song_id id, xfm_song_switch_timing timing)
 {
     if (!m || id <= 0 || id > 15) return;
     if (!m->song_present[id]) return;
@@ -1235,14 +1199,14 @@ void fm_song_schedule(fm_module* m, fm_song_id id, fm_song_switch_timing timing)
 }
 
 // Get current row
-int fm_song_get_row(fm_module* m)
+int xfm_song_get_row(xfm_module* m)
 {
     if (!m || !m->active_song.active) return 0;
     return m->active_song.current_row;
 }
 
 // Get total rows
-int fm_song_get_total_rows(fm_module* m, fm_song_id id)
+int xfm_song_get_total_rows(xfm_module* m, xfm_song_id id)
 {
     if (!m || id <= 0 || id > 15) return 0;
     if (!m->song_present[id]) return 0;
@@ -1250,19 +1214,19 @@ int fm_song_get_total_rows(fm_module* m, fm_song_id id)
 }
 
 // Update active song by a given number of samples
-static void update_song(fm_module* m, int num_samples)
+static void update_song(xfm_module* m, int num_samples)
 {
-    FmActiveSong& song = m->active_song;
+    XfmActiveSong& song = m->active_song;
     if (!song.active) return;
     if (song.song_id <= 0 || song.song_id > 15) return;
     if (!m->song_present[song.song_id]) return;
 
-    FmSongPattern& pat = m->song_patterns[song.song_id];
+    XfmSongPattern& pat = m->song_patterns[song.song_id];
 
     for (int i = 0; i < num_samples; i++) {
         // Check for pending song change with NOW timing
         if (m->pending_song.pending && m->pending_song.timing == FM_SONG_SWITCH_NOW) {
-            fm_song_play(m, m->pending_song.song_id, song.loop);
+            xfm_song_play(m, m->pending_song.song_id, song.loop);
             m->pending_song.pending = false;
             continue;
         }
@@ -1280,7 +1244,7 @@ static void update_song(fm_module* m, int num_samples)
 
             // Check for pending song change with STEP timing
             if (m->pending_song.pending && m->pending_song.timing == FM_SONG_SWITCH_STEP) {
-                fm_song_play(m, m->pending_song.song_id, song.loop);
+                xfm_song_play(m, m->pending_song.song_id, song.loop);
                 m->pending_song.pending = false;
                 continue;
             }
@@ -1316,7 +1280,7 @@ static void update_song(fm_module* m, int num_samples)
 // =============================================================================
 
 // Find a free voice, or steal the oldest one if all are busy
-static int allocate_voice(fm_module* m)
+static int allocate_voice(xfm_module* m)
 {
     // Look for a free voice first
     for (int i = 0; i < 6; i++) {
@@ -1337,7 +1301,7 @@ static int allocate_voice(fm_module* m)
     return oldest;
 }
 
-fm_voice_id fm_note_on(fm_module* m, int midi_note, fm_patch_id patch_id, int velocity)
+xfm_voice_id xfm_note_on(xfm_module* m, int midi_note, xfm_patch_id patch_id, int velocity)
 {
     if (!m || !m->chip) return FM_VOICE_INVALID;
 
@@ -1380,7 +1344,7 @@ fm_voice_id fm_note_on(fm_module* m, int midi_note, fm_patch_id patch_id, int ve
     return voice_idx;
 }
 
-void fm_note_off(fm_module* m, fm_voice_id v)
+void xfm_note_off(xfm_module* m, xfm_voice_id v)
 {
     if (!m || !m->chip) return;
     if (v < 0 || v > 5) return;
@@ -1396,7 +1360,7 @@ void fm_note_off(fm_module* m, fm_voice_id v)
 // AUDIO OUTPUT
 // =============================================================================
 
-void fm_mix(fm_module* m, int16_t* stream, int frames)
+void xfm_mix(xfm_module* m, int16_t* stream, int frames)
 {
     if (!m) return;
 
@@ -1432,7 +1396,7 @@ void fm_mix(fm_module* m, int16_t* stream, int frames)
     update_song(m, frames);
     update_sfx(m, frames);
 
-    // SYNTH mode: generate from chip using Bresenham for correct pitch
+    // Generate from chip using Bresenham for correct pitch
     m->chip->generate_buffer(stream, frames, m->sample_rate);
 
     // Apply volume

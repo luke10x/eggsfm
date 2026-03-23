@@ -1,18 +1,18 @@
 #pragma once
 // =============================================================================
-// new_opn_editor.h — YM2612/OPN2 patch editor ImGui widget for new API
+// xfm_opn_editor.h — YM2612/OPN2 patch editor ImGui widget for xfm API
 // Uses IngameFMSerializer from ingamefm_patch_serializer.h for code export/import
 // =============================================================================
 
 #include "imgui.h"
-#include "new_api.h"
+#include "xfm_api.h"
 #include "ingamefm_patch_serializer.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
 
-// Helper to convert between new API (fm_patch_opn) and old API (YM2612Patch)
-inline YM2612Patch toOldPatch(const fm_patch_opn& p)
+// Helper to convert between xfm API (xfm_patch_opn) and old API (YM2612Patch)
+inline YM2612Patch toOldPatch(const xfm_patch_opn& p)
 {
     YM2612Patch old = {};
     old.ALG = p.ALG;
@@ -35,9 +35,9 @@ inline YM2612Patch toOldPatch(const fm_patch_opn& p)
     return old;
 }
 
-inline fm_patch_opn toNewPatch(const YM2612Patch& old)
+inline xfm_patch_opn toNewPatch(const YM2612Patch& old)
 {
-    fm_patch_opn p = {};
+    xfm_patch_opn p = {};
     p.ALG = old.ALG;
     p.FB  = old.FB;
     p.LFO = 0;
@@ -144,7 +144,7 @@ inline void drawSsgIndicator(ImDrawList* dl, ImVec2 p0, ImVec2 sz, int ssg, ImU3
 }
 
 inline void drawEnvelopeIndicator(ImDrawList* dl, ImVec2 p0, ImVec2 sz,
-                                   const fm_patch_opn_operator& o, ImU32 col)
+                                   const xfm_patch_opn_operator& o, ImU32 col)
 {
     float x0=p0.x+1,y0=p0.y+1,w=sz.x-2,h=sz.y-2;
     float yTop=y0+2,yBot=y0+h-2;
@@ -174,7 +174,7 @@ inline void drawEnvelopeIndicator(ImDrawList* dl, ImVec2 p0, ImVec2 sz,
 
 struct OPNPatchEditor
 {
-    fm_patch_opn  patch;
+    xfm_patch_opn  patch;
     int         block      = 0;
     bool        lfoEnable  = false;
     int         lfoFreq    = 0;
@@ -184,7 +184,7 @@ struct OPNPatchEditor
     static constexpr int CODE_BUF_SIZE = 8192;
     char codeBuf[CODE_BUF_SIZE] = {};
 
-    fm_patch_opn  savedPatch;
+    xfm_patch_opn  savedPatch;
     bool        savedLfoEnable = false;
     int         savedLfoFreq   = 0;
     bool        hasSaved       = false;
@@ -194,7 +194,7 @@ struct OPNPatchEditor
     int         codeErrCol     = 0;
     char        patchName[64]  = "PATCH";
 
-    void init(const char* name, const fm_patch_opn& p,
+    void init(const char* name, const xfm_patch_opn& p,
               bool lfoEn = false, int lfoFr = 0, int blk = 0)
     {
         patch = p; lfoEnable = lfoEn; lfoFreq = lfoFr; block = blk;
@@ -284,7 +284,7 @@ struct OPNPatchEditor
                 ImGui::TableNextRow();
                 for(int op=0;op<4;op++) {
                     ImGui::TableSetColumnIndex(op);
-                    fm_patch_opn_operator& o=patch.op[op];
+                    xfm_patch_opn_operator& o=patch.op[op];
                     char s[16];
                     ImU32 opCol=OP_COLORS[op];
                     {float envH=42.f,envW=ImGui::GetContentRegionAvail().x;

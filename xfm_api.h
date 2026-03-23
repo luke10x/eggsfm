@@ -1,7 +1,7 @@
 
 /**
  * =============================================================================
- * ingamefm.h — Modular FM Synthesis Library (C99)
+ * xfm_api.h — eggsfm — Modular FM Synthesis Library (C99)
  * =============================================================================
  *
  * A modular FM audio system for games and demos.
@@ -13,25 +13,21 @@
  *   • OPQ  (YM??? extended variants)
  *   • OPL2 / OPL3
  *
- * The API abstracts scheduling and playback, while chip-specific details are
- * handled through patch structures and chip configuration.
- *
  * -----------------------------------------------------------------------------
  * 🧠 CORE MODEL
  * -----------------------------------------------------------------------------
  *
  * • Each module has:
  *     - One chip type
- *     - One scheduler mode (SONG or SFX)
  *
  * • Assets:
- *     - SYNTH (Furnace patterns)
+ *     - Furnace patterns (parsed and played in real-time)
  *
  * -----------------------------------------------------------------------------
  */
 
-#ifndef INGAMEFM_H
-#define INGAMEFM_H
+#ifndef XFM_H
+#define XFM_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -58,14 +54,14 @@ extern "C" {
  * • They are NOT interchangeable
  * • Engine does NOT reinterpret between formats
  *
- * You MUST pass correct fm_chip_type when assigning patches.
+ * You MUST pass correct xfm_chip_type when assigning patches.
  */
 
 /* =============================================================================
  * OPN (YM2612 / YM3438 style)
  * ============================================================================= */
 
-typedef struct fm_patch_opn_operator
+typedef struct xfm_patch_opn_operator
 {
     int8_t  DT;     /* detune (-3..+3) */
     uint8_t MUL;    /* frequency multiplier */
@@ -78,22 +74,22 @@ typedef struct fm_patch_opn_operator
     uint8_t SL;     /* sustain level */
     uint8_t RR;     /* release rate */
     uint8_t SSG;    /* SSG-EG (OPN specific) */
-} fm_patch_opn_operator;
+} xfm_patch_opn_operator;
 
-typedef struct fm_patch_opn
+typedef struct xfm_patch_opn
 {
     uint8_t ALG;     /* algorithm */
     uint8_t FB;      /* feedback */
     uint8_t LFO;     /* LFO enable / sensitivity */
 
-    fm_patch_opn_operator op[4]; /* 4 operators */
-} fm_patch_opn;
+    xfm_patch_opn_operator op[4]; /* 4 operators */
+} xfm_patch_opn;
 
 /* =============================================================================
  * OPM (YM2151 style)
  * ============================================================================= */
 
-typedef struct fm_patch_opm_operator
+typedef struct xfm_patch_opm_operator
 {
     uint8_t dt1;    /* coarse detune */
     uint8_t dt2;    /* fine detune */
@@ -109,9 +105,9 @@ typedef struct fm_patch_opm_operator
     uint8_t sl;
 
     uint8_t ssg;    /* SSG EG (OPM variant) */
-} fm_patch_opm_operator;
+} xfm_patch_opm_operator;
 
-typedef struct fm_patch_opm
+typedef struct xfm_patch_opm
 {
     uint8_t alg;
     uint8_t fb;
@@ -120,14 +116,14 @@ typedef struct fm_patch_opm
     uint8_t lfo_freq;
     uint8_t lfo_wave;
 
-    fm_patch_opm_operator op[4];
-} fm_patch_opm;
+    xfm_patch_opm_operator op[4];
+} xfm_patch_opm;
 
 /* =============================================================================
  * OPL2 / OPL3 (YM3812 / YMF262 style)
  * ============================================================================= */
 
-typedef struct fm_patch_opl_operator
+typedef struct xfm_patch_opl_operator
 {
     uint8_t am;     /* amplitude modulation */
     uint8_t vib;    /* vibrato */
@@ -142,28 +138,28 @@ typedef struct fm_patch_opl_operator
     uint8_t dr;
     uint8_t sl;
     uint8_t rr;
-} fm_patch_opl_operator;
+} xfm_patch_opl_operator;
 
-typedef struct fm_patch_opl
+typedef struct xfm_patch_opl
 {
     uint8_t alg;   /* connection type */
     uint8_t fb;
 
     uint8_t waveform; /* OPL2/OPL3 waveform select */
 
-    fm_patch_opl_operator op[2]; /* OPL2 = 2 ops, OPL3 may map 2+2 externally */
-} fm_patch_opl;
+    xfm_patch_opl_operator op[2]; /* OPL2 = 2 ops, OPL3 may map 2+2 externally */
+} xfm_patch_opl;
 
 /* =============================================================================
  * TYPES
  * ============================================================================= */
 
-typedef struct fm_module fm_module;
+typedef struct xfm_module xfm_module;
 
-typedef int fm_song_id;
-typedef int fm_sfx_id;
-typedef int fm_voice_id;
-typedef int fm_patch_id;
+typedef int xfm_song_id;
+typedef int xfm_sfx_id;
+typedef int xfm_voice_id;
+typedef int xfm_patch_id;
 
 #define FM_VOICE_INVALID (-1)
 
@@ -178,16 +174,7 @@ typedef enum {
     FM_CHIP_OPQ,         /* extended */
     FM_CHIP_OPL2,
     FM_CHIP_OPL3
-} fm_chip_type;
-
-/* =============================================================================
- * PLAYBACK & SCHEDULING
- * ============================================================================= */
-
-typedef enum {
-    FM_SCHED_SONG = 0,
-    FM_SCHED_SFX
-} fm_sched_mode;
+} xfm_chip_type;
 
 /* =============================================================================
  * MODULE LIFETIME
@@ -200,40 +187,28 @@ typedef enum {
  * @param buffer_frames audio buffer size
  * @param chip_type     FM chip family
  */
-fm_module* fm_module_create(
+xfm_module* xfm_module_create(
     int sample_rate,
     int buffer_frames,
-    fm_chip_type chip_type
+    xfm_chip_type chip_type
 );
 
 /**
  * Destroy module.
  */
-void fm_module_destroy(fm_module* m);
-
-/**
- * Set scheduler mode (init-time only).
- */
-void fm_module_set_scheduler(fm_module* m, fm_sched_mode mode);
+void xfm_module_destroy(xfm_module* m);
 
 /**
  * Set master volume (0.0 – 1.0).
  */
-void fm_module_set_volume(fm_module* m, float volume);
-
-/**
- * Set chip clock (Hz).
- *
- * Needed for accurate frequency generation.
- */
-void fm_module_set_clock(fm_module* m, int clock_hz);
+void xfm_module_set_volume(xfm_module* m, float volume);
 
 /**
  * Enable / configure LFO.
  *
  * Interpretation of freq depends on chip type.
  */
-void fm_module_set_lfo(fm_module* m, bool enable, int freq);
+void xfm_module_set_lfo(xfm_module* m, bool enable, int freq);
 
 /* =============================================================================
  * PATCH SYSTEM
@@ -251,31 +226,12 @@ void fm_module_set_lfo(fm_module* m, bool enable, int freq);
  *
  * The engine does NOT reinterpret formats.
  */
-void fm_patch_set(
-    fm_module* m,
-    fm_patch_id patch_id,
+void xfm_patch_set(
+    xfm_module* m,
+    xfm_patch_id patch_id,
     const void* patch_data,
     int patch_size,
-    fm_chip_type patch_type
-);
-
-/**
- * Assign patch to song channel.
- */
-void fm_patch_set_song_channel(
-    fm_module* m,
-    fm_song_id song,
-    int channel,
-    fm_patch_id patch_id
-);
-
-/**
- * Assign default patch to SFX.
- */
-void fm_patch_set_sfx(
-    fm_module* m,
-    fm_sfx_id sfx,
-    fm_patch_id patch_id
+    xfm_chip_type patch_type
 );
 
 /* =============================================================================
@@ -303,9 +259,9 @@ void fm_patch_set_sfx(
  * @param speed ticks per row (e.g. 6 = 100ms/row at 60Hz)
  * @return Song ID or -1 on error
  */
-fm_song_id fm_song_declare(
-    fm_module* m,
-    fm_song_id id,
+xfm_song_id xfm_song_declare(
+    xfm_module* m,
+    xfm_song_id id,
     const char* pattern_text,
     int tick_rate,
     int speed
@@ -319,10 +275,10 @@ fm_song_id fm_song_declare(
  * Start playing a song.
  *
  * @param m module
- * @param id Song ID from fm_song_declare
+ * @param id Song ID from xfm_song_declare
  * @param loop true = loop indefinitely, false = play once
  */
-void fm_song_play(fm_module* m, fm_song_id id, bool loop);
+void xfm_song_play(xfm_module* m, xfm_song_id id, bool loop);
 
 /**
  * Song switch timing options.
@@ -331,7 +287,7 @@ typedef enum {
     FM_SONG_SWITCH_NOW = 0,     /* Switch immediately */
     FM_SONG_SWITCH_STEP,         /* Switch at next row */
     FM_SONG_SWITCH_LOOP          /* Switch at next loop point */
-} fm_song_switch_timing;
+} xfm_song_switch_timing;
 
 /**
  * Schedule a song change.
@@ -340,7 +296,7 @@ typedef enum {
  * @param id Song ID to switch to
  * @param timing When to switch (NOW, STEP, or LOOP)
  */
-void fm_song_schedule(fm_module* m, fm_song_id id, fm_song_switch_timing timing);
+void xfm_song_schedule(xfm_module* m, xfm_song_id id, xfm_song_switch_timing timing);
 
 /**
  * Get current song row.
@@ -348,7 +304,7 @@ void fm_song_schedule(fm_module* m, fm_song_id id, fm_song_switch_timing timing)
  * @param m module
  * @return Current row index (0-based)
  */
-int fm_song_get_row(fm_module* m);
+int xfm_song_get_row(xfm_module* m);
 
 /**
  * Get total rows in a song.
@@ -357,7 +313,7 @@ int fm_song_get_row(fm_module* m);
  * @param id Song ID
  * @return Total number of rows
  */
-int fm_song_get_total_rows(fm_module* m, fm_song_id id);
+int xfm_song_get_total_rows(xfm_module* m, xfm_song_id id);
 
 /* =============================================================================
  * SFX DECLARATION
@@ -386,9 +342,9 @@ int fm_song_get_total_rows(fm_module* m, fm_song_id id);
  * @param speed ticks per row (e.g. 3 = 50ms/row)
  * @return SFX ID or -1 on error
  */
-fm_sfx_id fm_sfx_declare(
-    fm_module* m,
-    fm_sfx_id id,
+xfm_sfx_id xfm_sfx_declare(
+    xfm_module* m,
+    xfm_sfx_id id,
     const char* pattern_text,
     int tick_rate,
     int speed
@@ -414,30 +370,30 @@ fm_sfx_id fm_sfx_declare(
  *   7-9 = critical/must-hear
  *
  * @param m module
- * @param id SFX ID from fm_sfx_declare
+ * @param id SFX ID from xfm_sfx_declare
  * @param priority 0-9 (higher = harder to steal)
  * @return voice ID or FM_VOICE_INVALID
  */
-fm_voice_id fm_sfx_play(
-    fm_module* m,
-    fm_sfx_id id,
+xfm_voice_id xfm_sfx_play(
+    xfm_module* m,
+    xfm_sfx_id id,
     int priority
 );
 
 /**
  * Trigger note.
  */
-fm_voice_id fm_note_on(
-    fm_module* m,
+xfm_voice_id xfm_note_on(
+    xfm_module* m,
     int midi_note,
-    fm_patch_id patch_id,
+    xfm_patch_id patch_id,
     int velocity
 );
 
 /**
  * Release note.
  */
-void fm_note_off(fm_module* m, fm_voice_id v);
+void xfm_note_off(xfm_module* m, xfm_voice_id v);
 
 /* =============================================================================
  * AUDIO OUTPUT
@@ -449,10 +405,10 @@ void fm_note_off(fm_module* m, fm_voice_id v);
  * @param stream interleaved stereo (int16_t)
  * @param frames number of frames (L+R pairs)
  */
-void fm_mix(fm_module* m, int16_t* stream, int frames);
+void xfm_mix(xfm_module* m, int16_t* stream, int frames);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* INGAMEFM_H */
+#endif /* XFM_H */
