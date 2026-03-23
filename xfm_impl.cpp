@@ -71,7 +71,7 @@ public:
             write(port, 0x90 + hwSlot * 4 + hwch, ssg_hw);
         }
         write(port, 0xB0 + hwch, ((p.FB & 0x07) << 3) | (p.ALG & 0x07));
-        write(port, 0xB4 + hwch, 0xC0 | ((p.LFO & 0x03) << 4));
+        write(port, 0xB4 + hwch, 0xC0 | ((p.AMS & 0x03) << 4) | (p.FMS & 0x07));
     }
 
     void enable_lfo(bool enable, uint8_t freq) {
@@ -315,10 +315,10 @@ struct xfm_module {
 xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type chip_type)
 {
     // For now, only YM2612 and YM3438 are supported
-    if (chip_type != FM_CHIP_YM2612 && chip_type != FM_CHIP_YM3438) {
+    if (chip_type != XFM_CHIP_YM2612 && chip_type != XFM_CHIP_YM3438) {
         // Future: allocate appropriate chip type
-        // case FM_CHIP_OPM: chip = new XfmChipOpm(); break;
-        // case FM_CHIP_OPL2: chip = new XfmChipOpl2(); break;
+        // case XFM_CHIP_OPM: chip = new XfmChipOpm(); break;
+        // case XFM_CHIP_OPL2: chip = new XfmChipOpl2(); break;
         return nullptr;
     }
 
@@ -434,8 +434,8 @@ void xfm_patch_set(xfm_module* m, xfm_patch_id patch_id, const void* patch_data,
     if (!m || !patch_data || patch_id < 0 || patch_id > 255) return;
 
     // Only YM2612/YM3438 patches supported for now
-    if (patch_type != FM_CHIP_YM2612 && patch_type != FM_CHIP_YM3438) return;
-    if (m->chip_type != FM_CHIP_YM2612 && m->chip_type != FM_CHIP_YM3438) return;
+    if (patch_type != XFM_CHIP_YM2612 && patch_type != XFM_CHIP_YM3438) return;
+    if (m->chip_type != XFM_CHIP_YM2612 && m->chip_type != XFM_CHIP_YM3438) return;
 
     // Validate size
     if (patch_size != sizeof(xfm_patch_opn)) return;
@@ -669,6 +669,8 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
         if (sfx.pending_gap == 0) {
             m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
             m->current_patch[voice_idx] = sfx.pending_patch_id;
+            // Re-apply LFO settings after loading patch
+            m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
             double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
             m->chip->set_frequency(voice_idx, hz, 0);
             m->chip->key_on(voice_idx);
@@ -677,7 +679,7 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
             sfx.pending_has_note = false;
             return;
         }
-        
+
         // Wait until gap has fully elapsed before keying on
         if (current_gap < sfx.pending_gap) {
             return;
@@ -686,6 +688,8 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
         // Load patch and key on
         m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
         m->current_patch[voice_idx] = sfx.pending_patch_id;
+        // Re-apply LFO settings after loading patch
+        m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
         double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
         m->chip->set_frequency(voice_idx, hz, 0);
         m->chip->key_on(voice_idx);
@@ -1110,6 +1114,8 @@ static void song_commit_keyon(xfm_module* m, int current_gap)
             }
             m->chip->load_patch(patch, ch);
             m->current_patch[ch] = ch_state.pending_patch;
+            // Re-apply LFO settings after loading patch
+            m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
             double hz = 440.0 * std::pow(2.0, (ch_state.pending_note - 69) / 12.0);
             m->chip->set_frequency(ch, hz, 0);
             m->chip->key_on(ch);
@@ -1117,7 +1123,7 @@ static void song_commit_keyon(xfm_module* m, int current_gap)
             ch_state.pending_has_note = false;
             continue;
         }
-        
+
         // Wait until gap has fully elapsed before keying on
         if (current_gap < ch_state.pending_gap) {
             continue;
@@ -1141,6 +1147,8 @@ static void song_commit_keyon(xfm_module* m, int current_gap)
 
         m->chip->load_patch(patch, ch);
         m->current_patch[ch] = ch_state.pending_patch;
+        // Re-apply LFO settings after loading patch
+        m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
         double hz = 440.0 * std::pow(2.0, (ch_state.pending_note - 69) / 12.0);
         m->chip->set_frequency(ch, hz, 0);
         m->chip->key_on(ch);
@@ -1321,6 +1329,8 @@ xfm_voice_id xfm_note_on(xfm_module* m, int midi_note, xfm_patch_id patch_id, in
     if (m->current_patch[voice_idx] != patch_id) {
         m->chip->load_patch(m->patches[patch_id], voice_idx);
         m->current_patch[voice_idx] = patch_id;
+        // Re-apply LFO settings after loading patch
+        m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
     }
 
     // Calculate frequency from MIDI note (A4 = 69 = 440 Hz)

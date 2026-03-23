@@ -80,7 +80,8 @@ typedef struct xfm_patch_opn
 {
     uint8_t ALG;     /* algorithm */
     uint8_t FB;      /* feedback */
-    uint8_t LFO;     /* LFO enable / sensitivity */
+    uint8_t AMS;     /* AM sensitivity (0-3) */
+    uint8_t FMS;     /* FM sensitivity (0-7) */
 
     xfm_patch_opn_operator op[4]; /* 4 operators */
 } xfm_patch_opn;
@@ -168,12 +169,12 @@ typedef int xfm_patch_id;
  * ============================================================================= */
 
 typedef enum {
-    FM_CHIP_YM2612 = 0,  /* OPN2 — original, authentic Sega sound */
-    FM_CHIP_YM3438,      /* OPN2C — CMOS, cleaner */
-    FM_CHIP_OPM,         /* YM2151 */
-    FM_CHIP_OPQ,         /* extended */
-    FM_CHIP_OPL2,
-    FM_CHIP_OPL3
+    XFM_CHIP_YM2612 = 0,  /* OPN2 — original, authentic Sega sound */
+    XFM_CHIP_YM3438,      /* OPN2C — CMOS, cleaner */
+    XFM_CHIP_OPM,         /* YM2151 */
+    XFM_CHIP_OPQ,         /* extended */
+    XFM_CHIP_OPL2,
+    XFM_CHIP_OPL3
 } xfm_chip_type;
 
 /* =============================================================================
@@ -219,9 +220,9 @@ void xfm_module_set_lfo(xfm_module* m, bool enable, int freq);
  *
  * The data pointer must match the chip type:
  *
- *   FM_CHIP_YM2612/YM3438 → YM2612-style struct
- *   FM_CHIP_OPM  → YM2151-style struct
- *   FM_CHIP_OPL2 → OPL2 struct
+ *   XFM_CHIP_YM2612/YM3438 → YM2612-style struct
+ *   XFM_CHIP_OPM  → YM2151-style struct
+ *   XFM_CHIP_OPL2 → OPL2 struct
  *   etc.
  *
  * The engine does NOT reinterpret formats.

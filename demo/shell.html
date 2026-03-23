@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>eggsfm demo</title>
+  <style>
+    /* ── Reset ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #000;
+      font-family: 'Courier New', Courier, monospace;
+    }
+
+    /* ── Canvas fills the entire viewport ── */
+    #canvas {
+      display: block;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100vw !important;
+      height: 100vh !important;
+    }
+
+    /* ── Emscripten sometimes wraps canvas in a div — stretch that too ── */
+    #canvas-container, .emscripten_border {
+      position: fixed !important;
+      top: 0 !important; left: 0 !important;
+      width: 100% !important; height: 100% !important;
+      border: none !important;
+    }
+
+    /* ── FAB (Floating Action Button) ── */
+    #fab {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      left: auto;
+      transform: none;
+      
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      
+      background: rgba(126, 247, 200, 0.15);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 2px solid rgba(126, 247, 200, 0.4);
+      
+      color: #7ef7c8;
+      font-size: 20px;
+      cursor: pointer;
+      
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      
+      z-index: 100;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 4px 20px rgba(126, 247, 200, 0.2);
+    }
+    
+    #fab:hover {
+      background: rgba(126, 247, 200, 0.25);
+      border-color: rgba(126, 247, 200, 0.7);
+      transform: scale(1.1);
+    }
+    
+    #fab.hidden {
+      opacity: 0;
+      transform: scale(0);
+      pointer-events: none;
+    }
+
+    /* ── Floating info panel ── */
+    #info {
+      position: fixed;
+      bottom: 96px;
+      left: 50%;
+      transform: translateX(-50%);
+
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 16px;
+
+      padding: 20px 28px 18px;
+      max-width: 600px;
+      width: calc(100vw - 48px);
+
+      color: #e8e8e8;
+      font-size: 13px;
+      line-height: 1.65;
+
+      z-index: 99;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      opacity: 0;
+      transform: translateX(-50%) translateY(20px) scale(0.95);
+      pointer-events: none;
+    }
+    
+    #info.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0) scale(1);
+      pointer-events: auto;
+    }
+
+    #info h2 {
+      font-size: 16px;
+      font-weight: bold;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #7ef7c8;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #info .section {
+      margin-bottom: 14px;
+    }
+    
+    #info .section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #888;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #info .row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 5px;
+    }
+
+    #info .kbd {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 12px;
+      white-space: nowrap;
+      color: #fff;
+      letter-spacing: 0.04em;
+      flex-shrink: 0;
+      min-width: 24px;
+    }
+
+    #info .desc { color: #b0b0b0; }
+
+    #info .divider {
+      border: none;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      margin: 12px 0;
+    }
+
+    /* close button */
+    #info-close {
+      position: absolute;
+      top: 14px; right: 16px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
+      color: #888;
+      font-size: 16px;
+      cursor: pointer;
+      line-height: 1;
+      padding: 4px 8px;
+      transition: all 0.15s;
+    }
+    #info-close:hover { 
+      color: #fff; 
+      background: rgba(255,255,255,0.1);
+      border-color: rgba(255,255,255,0.2);
+    }
+
+    /* ── Log console inside the panel ── */
+    #log-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    #log-header span {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #7ef7c8;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #log-clear {
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 5px;
+      color: #888;
+      font-size: 10px;
+      font-family: 'Courier New', monospace;
+      cursor: pointer;
+      padding: 3px 10px;
+      transition: all 0.15s;
+    }
+    #log-clear:hover { 
+      color: #fff; 
+      background: rgba(255,255,255,0.1);
+      border-color: rgba(255,255,255,0.25); 
+    }
+
+    #log-output {
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      padding: 8px 12px;
+      height: 140px;
+      overflow-y: auto;
+      font-size: 11px;
+      line-height: 1.5;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(126,247,200,0.3) transparent;
+    }
+    #log-output::-webkit-scrollbar { width: 5px; }
+    #log-output::-webkit-scrollbar-thumb {
+      background: rgba(126,247,200,0.3);
+      border-radius: 3px;
+    }
+
+    /* one log line */
+    .log-line {
+      display: flex;
+      gap: 8px;
+      padding: 2px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.02);
+      word-break: break-all;
+    }
+    .log-line:last-child { border-bottom: none; }
+
+    .log-ts {
+      color: #444;
+      flex-shrink: 0;
+      user-select: none;
+      font-size: 10px;
+    }
+
+    .log-tag {
+      flex-shrink: 0;
+      min-width: 38px;
+      text-align: center;
+      border-radius: 4px;
+      font-size: 9px;
+      padding: 1px 5px;
+      user-select: none;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .log-msg { color: #c0c0c0; flex: 1; font-family: 'Consolas', 'Monaco', monospace; }
+
+    /* level colours */
+    .lvl-log  .log-tag { background: rgba(100,180,255,0.12); color: #64b4ff; }
+    .lvl-warn .log-tag { background: rgba(255,200,60,0.12);  color: #ffc83c; }
+    .lvl-warn .log-msg { color: #ffc83c; }
+    .lvl-err  .log-tag { background: rgba(255,80,80,0.15);   color: #ff5050; }
+    .lvl-err  .log-msg { color: #ff5050; }
+    .lvl-wasm .log-tag { background: rgba(126,247,200,0.12); color: #7ef7c8; }
+    .lvl-wasm .log-msg { color: #a8fde0; }
+    .lvl-perf .log-tag { background: rgba(200,160,255,0.12); color: #c8a0ff; }
+    .lvl-perf .log-msg { color: #c8a0ff; }
+    .lvl-info .log-tag { background: rgba(100,255,180,0.12); color: #64ffb4; }
+
+    /* ── Loading overlay ── */
+    #status {
+      position: fixed;
+      top: 12px; left: 50%;
+      transform: translateX(-50%);
+      z-index: 200;
+      color: rgba(200,200,200,0.7);
+      font-size: 12px;
+      pointer-events: none;
+      transition: opacity 0.4s;
+      background: rgba(0,0,0,0.6);
+      backdrop-filter: blur(8px);
+      padding: 8px 16px;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    #status.hidden { opacity: 0; }
+
+    #progress {
+      position: fixed;
+      top: 0; left: 0;
+      height: 3px;
+      background: linear-gradient(90deg, #7ef7c8, #64ffb4);
+      z-index: 300;
+      transition: width 0.2s, opacity 0.4s;
+      box-shadow: 0 0 10px rgba(126,247,200,0.5);
+    }
+    #progress.hidden { opacity: 0; }
+  </style>
+</head>
+<body>
+
+  <div id="progress" style="width:0%"></div>
+  <div id="status">Loading eggsfm…</div>
+
+  <canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
+
+  <!-- FAB - shows when panel is hidden -->
+  <div id="fab" title="Show controls">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <line x1="4" y1="12" x2="20" y2="12"></line>
+      <line x1="4" y1="6" x2="20" y2="6"></line>
+      <line x1="4" y1="18" x2="20" y2="18"></line>
+    </svg>
+  </div>
+
+  <!-- Floating info panel -->
+  <div id="info">
+    <button id="info-close" title="Hide">✕</button>
+    <h2>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+        <polyline points="2 17 12 22 22 17"></polyline>
+        <polyline points="2 12 12 17 22 12"></polyline>
+      </svg>
+      eggsfm demo
+    </h2>
+
+    <div class="section">
+      <div class="section-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+          <line x1="8" y1="21" x2="16" y2="21"></line>
+          <line x1="12" y1="17" x2="12" y2="21"></line>
+        </svg>
+        Piano Keyboard
+      </div>
+      <div class="row">
+        <span class="kbd">Z</span>
+        <span class="kbd">S</span>
+        <span class="kbd">X</span>
+        <span class="kbd">D</span>
+        <span class="kbd">C</span>
+        <span class="kbd">V</span>
+        <span class="kbd">G</span>
+        <span class="kbd">B</span>
+        <span class="kbd">H</span>
+        <span class="kbd">N</span>
+        <span class="kbd">J</span>
+        <span class="kbd">M</span>
+        <span class="desc">Play notes C4 → B4 (white &amp; black keys)</span>
+      </div>
+    </div>
+
+    <hr class="divider" />
+
+    <div class="section">
+      <div class="section-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polygon points="10 8 16 12 10 16 10 8"></polygon>
+        </svg>
+        Background Music
+      </div>
+      <div class="row">
+        <span class="desc">FM synth song with dynamic volume changes</span>
+      </div>
+    </div>
+
+    <hr class="divider" />
+
+    <div class="section">
+      <div class="section-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+          <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+          <line x1="6" y1="6" x2="6.01" y2="6"></line>
+          <line x1="6" y1="18" x2="6.01" y2="18"></line>
+        </svg>
+        System Console
+      </div>
+      <div id="log-header">
+        <span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="4 17 10 11 4 5"></polyline>
+            <line x1="12" y1="19" x2="20" y2="19"></line>
+          </svg>
+          Output
+        </span>
+        <button id="log-clear">Clear</button>
+      </div>
+      <div id="log-output"></div>
+    </div>
+  </div>
+
+  <script>
+    // =========================================================================
+    // LOG PANEL
+    // =========================================================================
+
+    var logOutput  = document.getElementById('log-output');
+    var MAX_LINES  = 80;
+    var logLines   = 0;
+    var startTime  = Date.now();
+
+    function appendLog(level, args) {
+      var msg = Array.prototype.slice.call(args).map(function(a) {
+        if (typeof a === 'object') {
+          try { return JSON.stringify(a); } catch(e) { return String(a); }
+        }
+        return String(a);
+      }).join(' ');
+
+      var isPerfLine = /avg.*ms.*fps/i.test(msg);
+
+      var ts = ((Date.now() - startTime) / 1000).toFixed(2);
+
+      var levelClass = isPerfLine ? 'lvl-perf'
+                     : level === 'warn' ? 'lvl-warn'
+                     : level === 'error' ? 'lvl-err'
+                     : level === 'wasm' ? 'lvl-wasm'
+                     : level === 'info' ? 'lvl-info'
+                     : 'lvl-log';
+
+      var tagText = isPerfLine ? 'perf'
+                  : level === 'warn' ? 'warn'
+                  : level === 'error' ? 'err'
+                  : level === 'wasm' ? 'wasm'
+                  : level === 'info' ? 'info'
+                  : 'log';
+
+      var line = document.createElement('div');
+      line.className = 'log-line ' + levelClass;
+      line.innerHTML =
+        '<span class="log-ts">' + ts + 's</span>' +
+        '<span class="log-tag">' + tagText + '</span>' +
+        '<span class="log-msg">' + escapeHtml(msg) + '</span>';
+
+      logOutput.appendChild(line);
+      logLines++;
+
+      if (logLines > MAX_LINES) {
+        logOutput.removeChild(logOutput.firstChild);
+        logLines--;
+      }
+
+      var threshold = 40;
+      var atBottom  = logOutput.scrollHeight - logOutput.scrollTop
+                      - logOutput.clientHeight < threshold;
+      if (atBottom) logOutput.scrollTop = logOutput.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g,'&amp;')
+              .replace(/</g,'&lt;')
+              .replace(/>/g,'&gt;');
+    }
+
+    var _origLog   = console.log.bind(console);
+    var _origWarn  = console.warn.bind(console);
+    var _origError = console.error.bind(console);
+
+    console.log = function() {
+      _origLog.apply(console, arguments);
+      appendLog('log', arguments);
+    };
+    console.warn = function() {
+      _origWarn.apply(console, arguments);
+      appendLog('warn', arguments);
+    };
+    console.error = function() {
+      _origError.apply(console, arguments);
+      appendLog('error', arguments);
+    };
+
+    document.getElementById('log-clear').addEventListener('click', function() {
+      logOutput.innerHTML = '';
+      logLines = 0;
+    });
+
+    // =========================================================================
+    // PANEL / FAB TOGGLE
+    // =========================================================================
+
+    var info = document.getElementById('info');
+    var fab = document.getElementById('fab');
+    var infoClose = document.getElementById('info-close');
+
+    // Show panel, hide FAB
+    function showPanel() {
+      info.classList.add('visible');
+      fab.classList.add('hidden');
+    }
+
+    // Hide panel, show FAB
+    function hidePanel() {
+      info.classList.remove('visible');
+      fab.classList.remove('hidden');
+    }
+
+    fab.addEventListener('click', showPanel);
+    infoClose.addEventListener('click', hidePanel);
+
+    // Click outside panel to close
+    document.addEventListener('click', function(e) {
+      if (info.classList.contains('visible') && 
+          !info.contains(e.target) && 
+          !fab.contains(e.target)) {
+        hidePanel();
+      }
+    });
+
+    // Escape key to close panel
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && info.classList.contains('visible')) {
+        hidePanel();
+      }
+    });
+
+    // =========================================================================
+    // CANVAS + EMSCRIPTEN MODULE
+    // =========================================================================
+
+    function resizeCanvas() {
+      var canvas = document.getElementById('canvas');
+      canvas.width  = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    var Module = {
+      canvas: document.getElementById('canvas'),
+
+      setStatus: function(text) {
+        var el  = document.getElementById('status');
+        var bar = document.getElementById('progress');
+        if (!text) {
+          el.classList.add('hidden');
+          bar.classList.add('hidden');
+          return;
+        }
+        el.textContent = text;
+        var m = text.match(/\((\d+(\.\d+)?)\/(\d+)\)/);
+        if (m) {
+          bar.style.width = (parseFloat(m[1]) / parseFloat(m[3]) * 100) + '%';
+        }
+      },
+
+      monitorRunDependencies: function(left) {
+        if (left === 0) Module.setStatus('');
+      },
+
+      onRuntimeInitialized: function() {
+        Module.setStatus('');
+        resizeCanvas();
+        console.log('info', 'eggsfm WASM runtime ready');
+      },
+
+      print: function(text) {
+        _origLog('[wasm]', text);
+        appendLog('wasm', [text]);
+      },
+      printErr: function(text) {
+        _origWarn('[wasm]', text);
+        appendLog('warn', ['[wasm] ' + text]);
+      },
+
+      arguments: []
+    };
+  </script>
+
+  {{{ SCRIPT }}}
+
+</body>
+</html>

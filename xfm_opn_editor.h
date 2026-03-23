@@ -17,8 +17,8 @@ inline YM2612Patch toOldPatch(const xfm_patch_opn& p)
     YM2612Patch old = {};
     old.ALG = p.ALG;
     old.FB  = p.FB;
-    old.AMS = 0;
-    old.FMS = 0;
+    old.AMS = p.AMS;
+    old.FMS = p.FMS;
     for (int i = 0; i < 4; i++) {
         old.op[i].DT   = p.op[i].DT;
         old.op[i].MUL  = p.op[i].MUL;
@@ -40,7 +40,8 @@ inline xfm_patch_opn toNewPatch(const YM2612Patch& old)
     xfm_patch_opn p = {};
     p.ALG = old.ALG;
     p.FB  = old.FB;
-    p.LFO = 0;
+    p.AMS = old.AMS;
+    p.FMS = old.FMS;
     for (int i = 0; i < 4; i++) {
         p.op[i].DT   = old.op[i].DT;
         p.op[i].MUL  = old.op[i].MUL;
@@ -174,31 +175,22 @@ inline void drawEnvelopeIndicator(ImDrawList* dl, ImVec2 p0, ImVec2 sz,
 
 struct OPNPatchEditor
 {
-    xfm_patch_opn  patch;
+    xfm_patch_opn patch;
     int         block      = 0;
-    bool        lfoEnable  = false;
-    int         lfoFreq    = 0;
     bool        open       = false;
     int         activeTab  = 0;
 
     static constexpr int CODE_BUF_SIZE = 8192;
     char codeBuf[CODE_BUF_SIZE] = {};
 
-    xfm_patch_opn  savedPatch;
-    bool        savedLfoEnable = false;
-    int         savedLfoFreq   = 0;
+    xfm_patch_opn savedPatch;
     bool        hasSaved       = false;
-    bool        codeHasError   = false;
-    char        codeError[256] = {};
-    int         codeErrLine    = 0;
-    int         codeErrCol     = 0;
     char        patchName[64]  = "PATCH";
 
-    void init(const char* name, const xfm_patch_opn& p,
-              bool lfoEn = false, int lfoFr = 0, int blk = 0)
+    void init(const char* name, const xfm_patch_opn& p, int blk = 0)
     {
-        patch = p; lfoEnable = lfoEn; lfoFreq = lfoFr; block = blk;
-        activeTab = 0; hasSaved = false; codeHasError = false;
+        patch = p; block = blk;
+        activeTab = 0; hasSaved = false;
         snprintf(patchName, sizeof(patchName), "%s", name);
     }
 
@@ -222,7 +214,7 @@ struct OPNPatchEditor
         ImGui::SameLine();
         if(drawTab("Code##tab", 1)) {
             activeTab = 1;
-            refreshCodeBuf();  // Populate code when switching to Code tab
+            refreshCodeBuf();
         }
         ImGui::Separator(); ImGui::Spacing();
 
@@ -231,17 +223,20 @@ struct OPNPatchEditor
             {
                 float avail=ImGui::GetContentRegionAvail().x;
                 float sp=ImGui::GetStyle().ItemSpacing.x;
-                float lw=ImGui::CalcTextSize("LFO").x+sp;
-                float sw=(avail-lw*3.f-sp*2.f)/3.f; if(sw<30)sw=30;
-                int alg = patch.ALG, fb = patch.FB, lfo = patch.LFO;
+                float lw=ImGui::CalcTextSize("FMS").x+sp;
+                float sw=(avail-lw*4.f-sp*3.f)/4.f; if(sw<30)sw=30;
+                int alg = patch.ALG, fb = patch.FB, ams = patch.AMS, fms = patch.FMS;
                 ImGui::Text("ALG"); ImGui::SameLine(); ImGui::SetNextItemWidth(sw);
                 if(ImGui::SliderInt("##ALG",&alg,0,7)) { patch.ALG = (uint8_t)alg; changed=true; }
                 ImGui::SameLine();
                 ImGui::Text("FB"); ImGui::SameLine(); ImGui::SetNextItemWidth(sw);
                 if(ImGui::SliderInt("##FB", &fb, 0,7)) { patch.FB = (uint8_t)fb; changed=true; }
                 ImGui::SameLine();
-                ImGui::Text("LFO"); ImGui::SameLine(); ImGui::SetNextItemWidth(sw);
-                if(ImGui::SliderInt("##LFO",&lfo,0,255)) { patch.LFO = (uint8_t)lfo; changed=true; }
+                ImGui::Text("AMS"); ImGui::SameLine(); ImGui::SetNextItemWidth(sw);
+                if(ImGui::SliderInt("##AMS",&ams,0,3)) { patch.AMS = (uint8_t)ams; changed=true; }
+                ImGui::SameLine();
+                ImGui::Text("FMS"); ImGui::SameLine(); ImGui::SetNextItemWidth(sw);
+                if(ImGui::SliderInt("##FMS",&fms,0,7)) { patch.FMS = (uint8_t)fms; changed=true; }
             }
             {
                 ImVec2 cSize(ImGui::GetContentRegionAvail().x,72.f);
@@ -252,23 +247,6 @@ struct OPNPatchEditor
                 char buf[16]; snprintf(buf,sizeof(buf),"ALG %d",patch.ALG);
                 dl->AddText(ImVec2(cPos.x+4,cPos.y+3),IM_COL32(180,180,180,200),buf);
                 drawAlgoIndicator(dl,ImVec2(cPos.x,cPos.y+14.f),ImVec2(cSize.x,cSize.y-14.f),patch.ALG);
-            }
-            ImGui::Spacing();
-            {
-                static const char* LFO_LBLS[]={"3.82 Hz","5.33 Hz","5.77 Hz","6.11 Hz","6.60 Hz","9.23 Hz","46.11 Hz","69.22 Hz"};
-                if(ImGui::Checkbox("LFO",&lfoEnable)) changed=true;
-                ImGui::SameLine();
-                ImGui::BeginDisabled(!lfoEnable);
-                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-                if(ImGui::BeginCombo("##lfoFreq",LFO_LBLS[lfoFreq])){
-                    for(int i=0;i<8;i++){
-                        bool sel=(i==lfoFreq);
-                        if(ImGui::Selectable(LFO_LBLS[i],sel)){lfoFreq=i;changed=true;}
-                        if(sel)ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
-                ImGui::EndDisabled();
             }
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ImGui::Text("Block (octave offset)"); ImGui::SameLine();
@@ -388,12 +366,18 @@ struct OPNPatchEditor
     }
 
 private:
+    bool        codeHasError   = false;
+    char        codeError[256] = {};
+    int         codeErrLine    = 0;
+    int         codeErrCol     = 0;
+
     void refreshCodeBuf() {
         YM2612Patch old = toOldPatch(patch);
-        std::string code = IngameFMSerializer::serialize(old, patchName, block, lfoEnable?1:0, lfoFreq);
+        std::string code = IngameFMSerializer::serialize(old, patchName, block, 0, 0);
         snprintf(codeBuf, CODE_BUF_SIZE, "%s", code.c_str());
         codeHasError=false; codeError[0]='\0'; codeErrLine=0; codeErrCol=0;
     }
+    
     bool tryApplyCode() {
         YM2612Patch outOld = {};
         int outBlock=0, outLfoEn=0, outLfoFreq=0;
@@ -403,11 +387,7 @@ private:
         if (ok) {
             patch = toNewPatch(outOld);
             block = outBlock;
-            lfoEnable = (outLfoEn != 0);
-            lfoFreq = outLfoFreq;
             savedPatch = patch;
-            savedLfoEnable = lfoEnable;
-            savedLfoFreq = lfoFreq;
             hasSaved = true;
             codeHasError = false;
             codeError[0] = '\0';
@@ -420,14 +400,11 @@ private:
             return false;
         }
     }
+    
     void restoreToSaved() {
         if(!hasSaved) return;
         patch = savedPatch;
-        lfoEnable = savedLfoEnable;
-        lfoFreq = savedLfoFreq;
         refreshCodeBuf();
         savedPatch = patch;
-        savedLfoEnable = lfoEnable;
-        savedLfoFreq = lfoFreq;
     }
 };
