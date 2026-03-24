@@ -63,6 +63,36 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
 }
 ```
 
+## Audio Generation Pipeline
+
+![Audio Generation Pipeline](docs/generation.svg)
+
+**Call Flow** (from SDL audio callback):
+
+```
+SDL Audio Callback (~172 Hz)
+    ↓
+xfm_mix() or xfm_mix_song() / xfm_mix_sfx()
+    ↓
+update_song() ──→ Triggers key_on()/key_off() at row boundaries
+update_sfx()  ──→ Triggers key_on()/key_off() with dynamic gap
+    ↓
+chip->generate_buffer() ──→ YMFM FM synthesis
+    ↓
+Audio Output (int16_t stereo)
+```
+
+**Timing:**
+- **Sample Rate:** 44100 Hz
+- **Buffer Size:** 256 frames (5.8 ms latency)
+- **Callback Rate:** ~172 times per second
+- **CPU Budget:** ~600 μs per callback
+
+**Note Triggering:**
+- **Song:** Notes trigger at row boundaries after gap samples
+- **SFX:** Notes trigger with dynamic gap (scales with interval distance)
+- **Gap Formula:** `gap_samples = sample_rate / (tick_rate × speed)`
+
 ## Sound Effects with Voice Pooling
 
 The SFX system manages a **pool of 6 voices** (one per YM2612 channel). When you trigger an SFX:

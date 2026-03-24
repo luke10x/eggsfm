@@ -424,6 +424,15 @@ void xfm_module_set_lfo(xfm_module* m, bool enable, int freq)
     m->chip->enable_lfo(enable, static_cast<uint8_t>(m->lfo_freq));
 }
 
+void xfm_module_reload_patches(xfm_module* m)
+{
+    if (!m || !m->chip) return;
+    // Reset current_patch tracking so patches reload on next note
+    for (int i = 0; i < 6; i++) {
+        m->current_patch[i] = -1;
+    }
+}
+
 // =============================================================================
 // PATCH SYSTEM
 // =============================================================================
@@ -859,6 +868,28 @@ static void update_sfx_voice(xfm_module* m, int slot)
 }
 
 // Update all SFX voices by a given number of samples
+/**
+ * @brief Advance all active SFX and trigger notes.
+ * 
+ * Called every audio callback to advance all active SFX.
+ * 
+ * Call Rate: ~172 Hz (for 256 frames @ 44100 Hz)
+ * From: xfm_mix() or xfm_mix_sfx()
+ * Thread: SDL audio thread
+ * 
+ * Processing:
+ *   For each sample:
+ *     For each SFX slot (0-5):
+ *       → update_sfx_voice() - Process one SFX
+ * 
+ * Note Triggering:
+ *   - Dynamic gap timing (gap scales with interval distance)
+ *   - key_on() when pending_gap reaches 0
+ *   - key_off() on "OFF" rows or SFX end
+ * 
+ * @param m Module instance
+ * @param num_samples Number of samples to advance (= frames from callback)
+ */
 static void update_sfx(xfm_module* m, int num_samples)
 {
     for (int i = 0; i < num_samples; i++) {
@@ -1221,7 +1252,93 @@ int xfm_song_get_total_rows(xfm_module* m, xfm_song_id id)
     return m->song_patterns[id].num_rows;
 }
 
-// Update active song by a given number of samples
+// =============================================================================
+// SONG PROCESSING
+// =============================================================================
+
+/**
+ * @brief Advance song position and trigger notes.
+ * 
+ * This function is called every audio callback to advance the active song
+ * by the number of samples in the output buffer.
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 📊 CALL RATE
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * Called: Once per audio callback (~172 Hz for 256 frames @ 44100 Hz)
+ * From:   xfm_mix() or xfm_mix_song()
+ * Thread: SDL audio thread
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 🔄 PROCESSING FLOW
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * For each sample in num_samples:
+ * 
+ *   1. Check for pending song change (FM_SONG_SWITCH_NOW)
+ *      - Immediate switch, no waiting
+ * 
+ *   2. Increment sample_in_row counter
+ *      - Tracks position within current row
+ *      - Range: 0 to samples_per_row-1
+ * 
+ *   3. song_commit_keyon() - Trigger pending notes
+ *      - Checks if gap has elapsed for each channel
+ *      - Calls chip->load_patch() for new notes
+ *      - Calls chip->set_frequency() for pitch
+ *      - Calls chip->key_on() to start envelope
+ * 
+ *   4. Check end of row
+ *      - If sample_in_row >= samples_per_row:
+ *        a. Reset sample_in_row = 0
+ *        b. Increment current_row
+ *        c. Check for pending song change (FM_SONG_SWITCH_STEP)
+ *        d. Check end of song (loop or stop)
+ *        e. song_process_row() - Parse next row pattern
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ⏱️  NOTE TRIGGER TIMING
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * Song Row Structure:
+ *   ┌──────────────────────────────────────────┐
+ *   │ Row N     │ Gap │ Note │ Sustain │ Gap  │ → Row N+1
+ *   └──────────────────────────────────────────┘
+ *              ↑              ↑
+ *         key_on()      key_off() or next note
+ * 
+ * Gap Timing:
+ *   - Gap provides clean transitions between notes
+ *   - Prevents clicking/popping
+ *   - Duration: samples_per_row / num_rows per row
+ * 
+ * Key-On Event:
+ *   - Triggered at END of gap (when sample_in_row reaches commit point)
+ *   - Loads patch into voice
+ *   - Sets frequency from note value
+ *   - Starts envelope (AR → DR → SR/SL)
+ * 
+ * Key-Off Event:
+ *   - Triggered by "OFF" row entry
+ *   - Or when new note starts on same channel
+ *   - Starts release phase (RR)
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 📦 STATE VARIABLES (XfmActiveSong)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * @param song_id       Current song ID (1-15, 0 = no song)
+ * @param active        Song is playing
+ * @param loop          Loop at end of song
+ * @param current_row   Current row index (0 to num_rows-1)
+ * @param sample_in_row Sample position within row (0 to samples_per_row-1)
+ * @param ticks_remaining Rows remaining in song
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * @param m Module instance
+ * @param num_samples Number of samples to advance ( = frames from audio callback)
+ */
 static void update_song(xfm_module* m, int num_samples)
 {
     XfmActiveSong& song = m->active_song;
@@ -1367,53 +1484,26 @@ void xfm_note_off(xfm_module* m, xfm_voice_id v)
 }
 
 // =============================================================================
-// AUDIO OUTPUT
+// AUDIO OUTPUT IMPLEMENTATION
 // =============================================================================
 
-void xfm_mix_song(xfm_module* m, int16_t* stream, int frames)
-{
-    if (!m || !m->chip) {
-        std::memset(stream, 0, frames * 2 * sizeof(int16_t));
-        return;
-    }
-
-    // Update song only
-    update_song(m, frames);
-
-    // Generate from chip using Bresenham for correct pitch
-    m->chip->generate_buffer(stream, frames, m->sample_rate);
-
-    // Apply volume
-    float vol = m->volume;
-    if (vol < 1.0f) {
-        for (int i = 0; i < frames * 2; i++) {
-            stream[i] = static_cast<int16_t>(stream[i] * vol);
-        }
-    }
-}
-
-void xfm_mix_sfx(xfm_module* m, int16_t* stream, int frames)
-{
-    if (!m || !m->chip) {
-        std::memset(stream, 0, frames * 2 * sizeof(int16_t));
-        return;
-    }
-
-    // Update SFX only
-    update_sfx(m, frames);
-
-    // Generate from chip using Bresenham for correct pitch
-    m->chip->generate_buffer(stream, frames, m->sample_rate);
-
-    // Apply volume
-    float vol = m->volume;
-    if (vol < 1.0f) {
-        for (int i = 0; i < frames * 2; i++) {
-            stream[i] = static_cast<int16_t>(stream[i] * vol);
-        }
-    }
-}
-
+/**
+ * @brief Generate audio samples from module (song + SFX).
+ * 
+ * This is the main implementation of xfm_mix(). Called from audio callback.
+ * 
+ * Call Chain (per audio callback):
+ *   SDL Audio Thread → sdl_audio_callback() → xfm_mix() →
+ *     → update_song()    [advances song position, triggers notes]
+ *     → update_sfx()     [advances SFX positions, triggers notes]
+ *     → generate_buffer() [FM synthesis via YMFM]
+ *     → Volume scaling
+ *     → Returns to SDL
+ * 
+ * @param m Module instance
+ * @param stream Output buffer (interleaved stereo int16_t)
+ * @param frames Number of stereo frames to generate
+ */
 void xfm_mix(xfm_module* m, int16_t* stream, int frames)
 {
     if (!m || !m->chip) {
@@ -1445,6 +1535,70 @@ void xfm_mix(xfm_module* m, int16_t* stream, int frames)
 
     // Update both song and SFX
     update_song(m, frames);
+    update_sfx(m, frames);
+
+    // Generate from chip using Bresenham for correct pitch
+    m->chip->generate_buffer(stream, frames, m->sample_rate);
+
+    // Apply volume
+    float vol = m->volume;
+    if (vol < 1.0f) {
+        for (int i = 0; i < frames * 2; i++) {
+            stream[i] = static_cast<int16_t>(stream[i] * vol);
+        }
+    }
+}
+
+/**
+ * @brief Generate audio samples from music module (song only).
+ * 
+ * Optimized version that skips SFX processing.
+ * Use for modules dedicated to background music.
+ * 
+ * @param m Module instance (should have active song)
+ * @param stream Output buffer (interleaved stereo int16_t)
+ * @param frames Number of stereo frames to generate
+ */
+void xfm_mix_song(xfm_module* m, int16_t* stream, int frames)
+{
+    if (!m || !m->chip) {
+        std::memset(stream, 0, frames * 2 * sizeof(int16_t));
+        return;
+    }
+
+    // Update song only
+    update_song(m, frames);
+
+    // Generate from chip using Bresenham for correct pitch
+    m->chip->generate_buffer(stream, frames, m->sample_rate);
+
+    // Apply volume
+    float vol = m->volume;
+    if (vol < 1.0f) {
+        for (int i = 0; i < frames * 2; i++) {
+            stream[i] = static_cast<int16_t>(stream[i] * vol);
+        }
+    }
+}
+
+/**
+ * @brief Generate audio samples from SFX module (SFX only).
+ * 
+ * Optimized version that skips song processing.
+ * Use for modules dedicated to sound effects.
+ * 
+ * @param m Module instance (should have active SFX)
+ * @param stream Output buffer (interleaved stereo int16_t)
+ * @param frames Number of stereo frames to generate
+ */
+void xfm_mix_sfx(xfm_module* m, int16_t* stream, int frames)
+{
+    if (!m || !m->chip) {
+        std::memset(stream, 0, frames * 2 * sizeof(int16_t));
+        return;
+    }
+
+    // Update SFX only
     update_sfx(m, frames);
 
     // Generate from chip using Bresenham for correct pitch

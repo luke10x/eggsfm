@@ -547,37 +547,170 @@ static AppState g_app;
 // SOUND SYSTEM INIT/TEARDOWN
 // =============================================================================
 
-// SDL audio callback - mixes both modules
+/**
+ * @brief SDL Audio Callback Function
+ * 
+ * This function is called by SDL's audio subsystem to fill the audio output buffer.
+ * It is the heart of real-time audio synthesis in this application.
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ⏱️  WHEN IS THIS CALLED?
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * SDL calls this function automatically whenever the audio device needs more
+ * audio data to play. The frequency depends on:
+ * 
+ *   1. Sample Rate (desired.freq = 44100 Hz)
+ *      - This means 44,100 samples per second
+ *      - For stereo (2 channels): 88,200 samples per second total
+ * 
+ *   2. Buffer Size (desired.samples = 256)
+ *      - Each callback fills 256 stereo frames (512 samples total)
+ *      - At 44100 Hz, this takes: 256 / 44100 = 0.0058 seconds = 5.8 ms
+ * 
+ *   3. Callback Frequency
+ *      - SDL calls this approximately every 5.8 ms
+ *      - That's ~172 times per second (44100 / 256 ≈ 171.9 Hz)
+ * 
+ * Example timeline:
+ *   t=0ms    → Callback #1 fills buffer with samples 0-255
+ *   t=5.8ms  → Callback #2 fills buffer with samples 256-511
+ *   t=11.6ms → Callback #3 fills buffer with samples 512-767
+ *   ... and so on
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 📦 PARAMETERS
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * @param userdata
+ *   - Pointer to custom data (we pass AppState*)
+ *   - Set in SDL_AudioSpec::userdata when opening audio device
+ *   - Use this to access synth modules, state, etc.
+ *   - Type: void* (cast to your type)
+ * 
+ * @param stream
+ *   - Pointer to the output buffer that SDL wants filled
+ *   - SDL allocates this buffer internally
+ *   - You MUST fill it with `len` bytes of audio data
+ *   - Format depends on desired.format (we use AUDIO_S16SYS)
+ *   - Type: Uint8* (cast to int16_t* for 16-bit audio)
+ * 
+ * @param len
+ *   - Number of BYTES SDL wants in this callback
+ *   - For stereo 16-bit: len = frames × 4 bytes
+ *     (2 channels × 2 bytes per sample = 4 bytes per frame)
+ *   - Example: len = 1024 bytes = 256 stereo frames
+ *   - Type: int
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 🔊 AUDIO FORMAT (AUDIO_S16SYS)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * We use AUDIO_S16SYS which means:
+ *   - S16    = Signed 16-bit integers (-32768 to +32767)
+ *   - SYS    = System byte order (little-endian on most systems)
+ * 
+ * Stereo interleaving:
+ *   stream[0-1]   = Left sample 0
+ *   stream[2-3]   = Right sample 0
+ *   stream[4-5]   = Left sample 1
+ *   stream[6-7]   = Right sample 1
+ *   ...
+ * 
+ * To calculate frames from len:
+ *   frames = len / 4
+ *   (because each stereo frame = 2 channels × 2 bytes = 4 bytes)
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ⚠️  CRITICAL RULES
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * 1. NEVER BLOCK - This callback runs in SDL's audio thread.
+ *    If you block (sleep, wait, I/O), audio will stutter.
+ * 
+ * 2. ALWAYS FILL THE BUFFER - SDL expects exactly `len` bytes.
+ *    If you don't fill it, you'll get silence or garbage.
+ * 
+ * 3. NO SDL FUNCTIONS - Don't call SDL functions from here (except maybe
+ *    SDL_LockAudioDevice if you really need to).
+ * 
+ * 4. KEEP IT FAST - You have ~5.8ms to do all your work.
+ *    Use efficient algorithms, avoid allocations.
+ * 
+ * 5. THREAD SAFE - This runs on a different thread than your main loop.
+ *    Use locks if sharing data with main thread.
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 🎼 LATENCY CALCULATION
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * Audio latency = Buffer Size / Sample Rate
+ * 
+ * Our settings:
+ *   - Buffer: 256 frames
+ *   - Sample Rate: 44100 Hz
+ *   - Latency: 256 / 44100 = 0.0058s = 5.8ms
+ * 
+ * This is the delay between:
+ *   - User presses key → Sound starts playing
+ *   - Code changes patch → You hear the change
+ * 
+ * Lower buffer = lower latency but more CPU usage
+ * Higher buffer = higher latency but more stable audio
+ * 
+ * Common values:
+ *   - 128 frames = 2.9ms (very low latency, high CPU)
+ *   - 256 frames = 5.8ms (good balance) ← We use this
+ *   - 512 frames = 11.6ms (noticeable delay)
+ *   - 1024 frames = 23.2ms (too laggy for games)
+ */
 static void sdl_audio_callback(void* userdata, Uint8* stream, int len)
 {
+    // Cast userdata back to our AppState
     AppState* app = static_cast<AppState*>(userdata);
+    
+    // Cast stream to 16-bit signed integers (AUDIO_S16SYS format)
     int16_t* buffer = reinterpret_cast<int16_t*>(stream);
-    int frames = len / 4; // stereo 16-bit
-
-    // Clear buffer first
+    
+    // Calculate number of stereo frames
+    // len is in bytes, each stereo frame = 4 bytes (2 channels × 2 bytes)
+    int frames = len / 4;
+    
+    // Example: len = 1024 bytes → frames = 256 stereo frames
+    
+    // Clear buffer first (prevents garbage/noise)
     std::memset(buffer, 0, len);
-
+    
     // Mix music module (song only - more efficient!)
+    // xfm_mix_song generates 'frames' stereo samples into buffer
     if (app->music_module) {
         xfm_mix_song(app->music_module, buffer, frames);
     }
-
+    
     // Mix SFX module (SFX only - more efficient!)
+    // We use a temporary buffer for additive mixing
     if (app->sfx_module) {
-        // For additive mixing, we need to accumulate
-        // For simplicity, just mix SFX for now
+        // Allocate temp buffer for SFX (same size as output buffer)
         int16_t* sfx_buffer = new int16_t[frames * 2];
         std::memset(sfx_buffer, 0, frames * 2 * sizeof(int16_t));
+        
+        // Generate SFX into temp buffer
         xfm_mix_sfx(app->sfx_module, sfx_buffer, frames);
-
-        // Simple additive mix with clipping prevention
+        
+        // Additive mixing: combine music + SFX
+        // Prevent clipping by saturating at 16-bit limits
         for (int i = 0; i < frames * 2; i++) {
             int mixed = static_cast<int>(buffer[i]) + static_cast<int>(sfx_buffer[i]);
-            mixed = std::max(-32768, std::min(32767, mixed));
+            mixed = std::max(-32768, std::min(32767, mixed));  // Clamp to 16-bit range
             buffer[i] = static_cast<int16_t>(mixed);
         }
+        
+        // Free temp buffer (consider using stack array for performance)
         delete[] sfx_buffer;
     }
+    
+    // When this function returns, SDL takes the filled buffer
+    // and sends it to the audio hardware (speakers/headphones)
 }
 
 static bool start_sound_system(AppState& app)
