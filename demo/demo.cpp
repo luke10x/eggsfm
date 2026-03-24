@@ -554,6 +554,21 @@ static AppState g_app;
  * It is the heart of real-time audio synthesis in this application.
  * 
  * ─────────────────────────────────────────────────────────────────────────────
+ * ⚠️  EMSCRIPTEN/WEBASSEMBLY NOTE
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * In Emscripten builds, this callback runs on the MAIN THREAD (not a separate
+ * audio thread like native SDL). This has important implications:
+ * 
+ *   1. NO THREAD LOCKING NEEDED - Single thread, no race conditions
+ *   2. MUST BE FAST - Audio callback blocks rendering while running
+ *   3. DROPPED FRAMES - If this takes >1ms, visible stutter occurs
+ *   4. NO BLOCKING CALLS - No file I/O, no network, no malloc
+ * 
+ * Native SDL: Audio thread runs independently at 172 Hz
+ * Emscripten:  Audio callback interleaved with rendering on main thread
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
  * ⏱️  WHEN IS THIS CALLED?
  * ─────────────────────────────────────────────────────────────────────────────
  * 
@@ -572,11 +587,18 @@ static AppState g_app;
  *      - SDL calls this approximately every 5.8 ms
  *      - That's ~172 times per second (44100 / 256 ≈ 171.9 Hz)
  * 
- * Example timeline:
+ * Example timeline (NATIVE - separate audio thread):
  *   t=0ms    → Callback #1 fills buffer with samples 0-255
  *   t=5.8ms  → Callback #2 fills buffer with samples 256-511
  *   t=11.6ms → Callback #3 fills buffer with samples 512-767
  *   ... and so on
+ * 
+ * Example timeline (EMSCRIPTEN - main thread):
+ *   t=0ms    → Audio callback (5.8ms budget, must finish fast!)
+ *   t=0.5ms  → Audio callback returns → rendering continues
+ *   t=33ms   → Next frame render
+ *   t=38.8ms → Next audio callback
+ *   ... audio and rendering INTERLEAVE on same thread
  * 
  * ─────────────────────────────────────────────────────────────────────────────
  * 📦 PARAMETERS
@@ -627,6 +649,7 @@ static AppState g_app;
  * 
  * 1. NEVER BLOCK - This callback runs in SDL's audio thread.
  *    If you block (sleep, wait, I/O), audio will stutter.
+ *    In Emscripten, blocking also freezes rendering!
  * 
  * 2. ALWAYS FILL THE BUFFER - SDL expects exactly `len` bytes.
  *    If you don't fill it, you'll get silence or garbage.
@@ -635,10 +658,12 @@ static AppState g_app;
  *    SDL_LockAudioDevice if you really need to).
  * 
  * 4. KEEP IT FAST - You have ~5.8ms to do all your work.
+ *    In Emscripten, aim for <1ms to avoid frame drops!
  *    Use efficient algorithms, avoid allocations.
  * 
- * 5. THREAD SAFE - This runs on a different thread than your main loop.
- *    Use locks if sharing data with main thread.
+ * 5. THREAD SAFETY (Native only) - This runs on a different thread than your
+ *    main loop on native. Use locks if sharing data with main thread.
+ *    In Emscripten, everything is on main thread - no locks needed!
  * 
  * ─────────────────────────────────────────────────────────────────────────────
  * 🎼 LATENCY CALCULATION

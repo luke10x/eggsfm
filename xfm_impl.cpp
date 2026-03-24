@@ -112,7 +112,7 @@ public:
             write(port, 0x40 + slot * 4 + hwch, 0x7F);
         }
         // Also key off to reset state
-        // key_off(ch);
+        key_off(ch);
     }
 
     // Generate one sample at 44100 Hz reference rate
@@ -1303,7 +1303,7 @@ int xfm_song_get_total_rows(xfm_module* m, xfm_song_id id)
  * 
  * Song Row Structure:
  *   ┌──────────────────────────────────────────┐
- *   │ Row N     │ Gap │ Note │ Sustain │ Gap  │ → Row N+1
+ *   │ Row N     │ Gap │ Note │ Sustain │ Gap   │ → Row N+1
  *   └──────────────────────────────────────────┘
  *              ↑              ↑
  *         key_on()      key_off() or next note
@@ -1488,68 +1488,6 @@ void xfm_note_off(xfm_module* m, xfm_voice_id v)
 // =============================================================================
 
 /**
- * @brief Generate audio samples from module (song + SFX).
- * 
- * This is the main implementation of xfm_mix(). Called from audio callback.
- * 
- * Call Chain (per audio callback):
- *   SDL Audio Thread → sdl_audio_callback() → xfm_mix() →
- *     → update_song()    [advances song position, triggers notes]
- *     → update_sfx()     [advances SFX positions, triggers notes]
- *     → generate_buffer() [FM synthesis via YMFM]
- *     → Volume scaling
- *     → Returns to SDL
- * 
- * @param m Module instance
- * @param stream Output buffer (interleaved stereo int16_t)
- * @param frames Number of stereo frames to generate
- */
-void xfm_mix(xfm_module* m, int16_t* stream, int frames)
-{
-    if (!m || !m->chip) {
-        std::memset(stream, 0, frames * 2 * sizeof(int16_t));
-        return;
-    }
-
-    // Safety: Clean up any voices that are active but have no corresponding SFX
-    for (int i = 0; i < 6; i++) {
-        if (m->voices[i].active && m->voices[i].sfx_id >= 0) {
-            // Check if there's a matching active_sfx entry
-            bool found = false;
-            for (int slot = 0; slot < 6; slot++) {
-                if (m->active_sfx[slot].active && m->active_sfx[slot].voice_idx == i) {
-                    found = true;
-                    break;
-                }
-            }
-            // If no matching SFX, this voice is stuck - release it
-            if (!found) {
-                m->chip->key_off(i);
-                m->voices[i].active = false;
-                m->voices[i].priority = 0;
-                m->voices[i].sfx_id = -1;
-                m->channel_active[i] = false;
-            }
-        }
-    }
-
-    // Update both song and SFX
-    update_song(m, frames);
-    update_sfx(m, frames);
-
-    // Generate from chip using Bresenham for correct pitch
-    m->chip->generate_buffer(stream, frames, m->sample_rate);
-
-    // Apply volume
-    float vol = m->volume;
-    if (vol < 1.0f) {
-        for (int i = 0; i < frames * 2; i++) {
-            stream[i] = static_cast<int16_t>(stream[i] * vol);
-        }
-    }
-}
-
-/**
  * @brief Generate audio samples from music module (song only).
  * 
  * Optimized version that skips SFX processing.
@@ -1572,7 +1510,7 @@ void xfm_mix_song(xfm_module* m, int16_t* stream, int frames)
     // Generate from chip using Bresenham for correct pitch
     m->chip->generate_buffer(stream, frames, m->sample_rate);
 
-    // Apply volume
+    // // Apply volume
     float vol = m->volume;
     if (vol < 1.0f) {
         for (int i = 0; i < frames * 2; i++) {
