@@ -15,3 +15,8 @@
 
 /demo/index.*
 /demo.c
+/xfm_textplayer
+/test_song.txt
+/test_invalid.txt
+/test_missing_patch.txt
+/patch_*.h
