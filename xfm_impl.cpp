@@ -538,8 +538,9 @@ xfm_sfx_id xfm_sfx_declare(xfm_module* m, xfm_sfx_id id, const char* pattern_tex
         num_rows = num_rows * 10 + (*p - '0');
         p++;
     }
-    
-    if (num_rows <= 0 || num_rows > 256) return -1;
+
+    // Allow up to 65536 rows (16-bit range) for long songs
+    if (num_rows <= 0 || num_rows > 65536) return -1;
     
     // Skip to first row data
     while (*p && *p != '\n') p++;
@@ -956,8 +957,9 @@ xfm_song_id xfm_song_declare(xfm_module* m, xfm_song_id id, const char* pattern_
         num_rows = num_rows * 10 + (*p - '0');
         p++;
     }
-    
-    if (num_rows <= 0 || num_rows > 256) return -1;
+
+    // Allow up to 65536 rows (16-bit range) for long songs
+    if (num_rows <= 0 || num_rows > 65536) return -1;
     
     // Skip to first row data
     while (*p && *p != '\n') p++;
