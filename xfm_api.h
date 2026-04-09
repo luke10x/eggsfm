@@ -219,6 +219,17 @@ void xfm_module_set_lfo(xfm_module* m, bool enable, int freq);
  */
 void xfm_module_reload_patches(xfm_module* m);
 
+/**
+ * @brief Reset module state for clean export
+ *
+ * Call this before exporting SFX to ensure no state leakage
+ * from previous exports. Resets voices, SFX state, song state,
+ * and the Bresenham resampling accumulator.
+ *
+ * @param m Module instance
+ */
+void xfm_module_reset_state(xfm_module* m);
+
 /* =============================================================================
  * PATCH SYSTEM
  * ============================================================================= */

@@ -38,9 +38,10 @@ public:
     };
 
     Interface intf;
-    ymfm::ym2612 chip;
+    ymfm::ym3438 chip;
+    int acc_err;  // Bresenham resampling accumulator
 
-    XfmChipOpn() : chip(intf) { chip.reset(); }
+    XfmChipOpn() : chip(intf), acc_err(0) { chip.reset(); }
 
     void write(uint8_t port, uint8_t reg, uint8_t val) {
         uint8_t addr = port * 2;
@@ -76,6 +77,14 @@ public:
 
     void enable_lfo(bool enable, uint8_t freq) {
         write(0, 0x22, enable ? (0x08 | (freq & 0x07)) : 0x00);
+    }
+
+    void reset_resample_accum() {
+        acc_err = 0;
+    }
+
+    void reset_chip() {
+        chip.reset();
     }
 
     void set_frequency(int ch, double hz, int octaveOffset = 0) {
@@ -119,7 +128,7 @@ public:
 
     // Generate one sample at 44100 Hz reference rate
     void generate(int16_t* L, int16_t* R) {
-        ymfm::ym2612::output_data out;
+        ymfm::ym3438::output_data out;
         chip.generate(&out, 1);
         *L = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[0])));
         *R = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[1])));
@@ -137,21 +146,20 @@ public:
         But what if I want to output at a "normal" rate, like 44.1kHz? Sorry, you'll have to rate convert as needed.
         */
         static int REF_RATE = chip.sample_rate(YM_CLOCK);
-
-        static int acc_err = 0;
         
         for (int i = 0; i < samples; i++) {
             int16_t L, R;
             do {
                 generate(&L, &R);
-                acc_err += sample_rate;
-            } while (acc_err < REF_RATE);
-            acc_err -= REF_RATE;
+                this->acc_err += sample_rate;
+            } while (this->acc_err < REF_RATE);
+            this->acc_err -= REF_RATE;
             stream[i * 2 + 0] = L;
             stream[i * 2 + 1] = R;
         }
     }
 };
+
 
 // =============================================================================
 // FM MODULE INTERNAL STRUCTURE
@@ -287,7 +295,7 @@ struct xfm_module {
     xfm_chip_type    chip_type;
     float           volume;
 
-    // OPN chip instance
+    // OPN chip instance (now uses YM3438 variant for accurate DAC behavior)
     XfmChipOpn*      chip;
 
     // Patch storage (up to 256 patches)
@@ -455,6 +463,46 @@ void xfm_module_reload_patches(xfm_module* m)
     for (int i = 0; i < 6; i++) {
         m->current_patch[i] = -1;
     }
+}
+
+// Reset module state for clean export (call before each SFX export)
+void xfm_module_reset_state(xfm_module* m)
+{
+    if (!m || !m->chip) return;
+    
+    // CRITICAL: Reset YM2612 chip internal state (phase accumulators, envelopes, etc.)
+    // This prevents state leakage from previous exports that corrupts audio
+    m->chip->reset_chip();
+    
+    // Key off all voice and clear state
+    for (int i = 0; i < 6; i++) {
+        m->chip->key_off(i);
+        m->voices[i].active = false;
+        m->voices[i].midi_note = -1;
+        m->voices[i].patch_id = -1;
+        m->voices[i].priority = 0;
+        m->voices[i].sfx_id = -1;
+        m->voices[i].age = 0;
+        m->channel_active[i] = false;
+        m->current_patch[i] = -1;
+        m->active_sfx[i].active = false;
+        m->active_sfx[i].sfx_id = -1;
+        m->active_sfx[i].voice_idx = -1;
+        m->active_sfx[i].current_row = 0;
+        m->active_sfx[i].sample_in_row = 0;
+        m->active_sfx[i].rows_remaining = 0;
+        m->active_sfx[i].pending_has_note = false;
+        m->active_sfx[i].pending_note = -1;
+        m->active_sfx[i].pending_patch_id = -1;
+        m->active_sfx[i].auto_off_scheduled = false;
+    }
+    
+    // Reset song state
+    m->active_song.active = false;
+    m->active_song.song_id = 0;
+    m->active_song.sample_in_row = 0;
+    m->active_song.current_row = 0;
+    m->active_song.rows_remaining = 0;
 }
 
 // =============================================================================

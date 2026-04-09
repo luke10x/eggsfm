@@ -23,6 +23,18 @@ extern "C" {
 #endif
 
 /**
+ * @brief Load a WAV file into memory as an embedded array.
+ *
+ * Helper function to load WAV data for use with xfm_wav_load_memory().
+ * Returns malloc'd buffer that caller must free().
+ *
+ * @param filename Path to WAV file
+ * @param outSize Receives the file size
+ * @return Pointer to WAV data, or NULL on error
+ */
+void* xfm_wav_file_to_memory(const char* filename, int* outSize);
+
+/**
  * @brief Export a song pattern to a WAV file.
  *
  * Renders the entire song (all rows) to a stereo WAV file.
@@ -37,6 +49,21 @@ extern "C" {
  * @note Song loops are NOT applied - exports exactly num_rows
  */
 int xfm_export_song(xfm_module* m, xfm_song_id song_id, const char* filename);
+
+/**
+ * @brief Export a song pattern to a WAV buffer in memory.
+ *
+ * Renders the entire song (all rows) to a stereo WAV buffer.
+ * The song is rendered at the module's sample rate.
+ *
+ * @param m Module instance (must have song declared)
+ * @param song_id Song ID to export (1-15)
+ * @param outSize Receives the size of the WAV data in bytes
+ * @return Pointer to malloc'd WAV data, or NULL on error. Caller must free().
+ *
+ * @note Song loops are NOT applied - exports exactly num_rows
+ */
+void* xfm_export_song_to_memory(xfm_module* m, xfm_song_id song_id, int* outSize);
 
 /**
  * @brief Export an SFX pattern to a WAV file.
@@ -54,31 +81,17 @@ int xfm_export_song(xfm_module* m, xfm_song_id song_id, const char* filename);
 int xfm_export_sfx(xfm_module* m, int sfx_id, const char* filename);
 
 /**
- * @brief Load a WAV file into memory as an embedded array.
+ * @brief Export an SFX pattern to a WAV buffer in memory.
  *
- * Helper function to load WAV data for use with xfm_wav_load_memory().
- * Returns malloc'd buffer that caller must free().
+ * Renders the entire SFX pattern to a stereo WAV buffer.
+ * The SFX is rendered at the module's sample rate.
  *
- * @param filename Path to WAV file
- * @param outSize Receives the file size
- * @return Pointer to WAV data, or NULL on error
+ * @param m Module instance (must have SFX declared)
+ * @param sfx_id SFX ID to export (0-255)
+ * @param outSize Receives the size of the WAV data in bytes
+ * @return Pointer to malloc'd WAV data, or NULL on error. Caller must free().
  */
-// void* xfm_wav_file_to_memory(const char* filename, int* outSize);
-
-/**
- * @brief Load WAV data from memory (embedded xxd array).
- *
- * Alternative to xfm_wav_load_file() for embedded assets.
- *
- * @param m Module instance
- * @param type Content type (song or SFX)
- * @param id Content ID (1-15 for songs, 0-255 for SFX)
- * @param data Pointer to WAV data in memory (from xxd include)
- * @param size Size of WAV data in bytes
- * @return 0 on success, -1 on error
- */
-// int xfm_wav_load_memory(xfm_wav_module* m, xfm_wav_type type, int id, 
-//                         const void* data, int size);
+void* xfm_export_sfx_to_memory(xfm_module* m, int sfx_id, int* outSize);
 
 #ifdef __cplusplus
 }

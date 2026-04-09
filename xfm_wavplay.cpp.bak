@@ -419,14 +419,6 @@ xfm_wav_voice_id xfm_wav_sfx_play(xfm_wav_module* m, int sfx_id, int priority)
     int voice = allocate_wav_sfx_voice(m, priority);
     if (voice < 0) return -1;
     
-
-    // Stop any existing SFX on this voice before starting new one
-    // This matches the synth behavior where key_off() is called before key_on()
-    if (m->active_sfx[voice].active) {
-        // Voice was playing something - stop it first
-        m->active_sfx[voice].active = false;
-    }
-
     XfmWavActiveSfx& sfx = m->active_sfx[voice];
     sfx.sfx_id = sfx_id;
     sfx.priority = priority;
