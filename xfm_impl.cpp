@@ -1385,10 +1385,10 @@ static void song_write_opn_channel_regs(xfm_module* m, int ch)
 static void song_set_opn_operator_tl(xfm_module* m, int ch, int op, int value);
 static void song_write_channel_frequency(xfm_module* m, int ch, const XfmSongChannel& ch_state);
 
-static uint32_t song_macro_target_mask(int target)
+static uint64_t song_macro_target_mask(int target)
 {
     if (target <= XFM_MACRO_NONE || target >= XFM_MACRO_TARGET_COUNT) return 0;
-    return 1u << target;
+    return 1ull << target;
 }
 
 static void song_apply_macro_value(xfm_module* m, int ch, int target, int value)
@@ -1411,6 +1411,48 @@ static void song_apply_macro_value(xfm_module* m, int ch, int target, int value)
         int op = target - XFM_MACRO_DT1;
         if (!m->live_patch_valid[ch]) return;
         m->live_patches[ch].op[op].DT = static_cast<int8_t>(std::min(3, std::max(-3, value)));
+        song_write_opn_operator(m, ch, op);
+        return;
+    }
+    if (target >= XFM_MACRO_AR1 && target <= XFM_MACRO_AR4) {
+        int op = target - XFM_MACRO_AR1;
+        if (!m->live_patch_valid[ch]) return;
+        m->live_patches[ch].op[op].AR = static_cast<uint8_t>(std::min(31, std::max(0, value)));
+        song_write_opn_operator(m, ch, op);
+        return;
+    }
+    if (target >= XFM_MACRO_DR1 && target <= XFM_MACRO_DR4) {
+        int op = target - XFM_MACRO_DR1;
+        if (!m->live_patch_valid[ch]) return;
+        m->live_patches[ch].op[op].DR = static_cast<uint8_t>(std::min(31, std::max(0, value)));
+        song_write_opn_operator(m, ch, op);
+        return;
+    }
+    if (target >= XFM_MACRO_SR1 && target <= XFM_MACRO_SR4) {
+        int op = target - XFM_MACRO_SR1;
+        if (!m->live_patch_valid[ch]) return;
+        m->live_patches[ch].op[op].SR = static_cast<uint8_t>(std::min(31, std::max(0, value)));
+        song_write_opn_operator(m, ch, op);
+        return;
+    }
+    if (target >= XFM_MACRO_SL1 && target <= XFM_MACRO_SL4) {
+        int op = target - XFM_MACRO_SL1;
+        if (!m->live_patch_valid[ch]) return;
+        m->live_patches[ch].op[op].SL = static_cast<uint8_t>(std::min(15, std::max(0, value)));
+        song_write_opn_operator(m, ch, op);
+        return;
+    }
+    if (target >= XFM_MACRO_RR1 && target <= XFM_MACRO_RR4) {
+        int op = target - XFM_MACRO_RR1;
+        if (!m->live_patch_valid[ch]) return;
+        m->live_patches[ch].op[op].RR = static_cast<uint8_t>(std::min(15, std::max(0, value)));
+        song_write_opn_operator(m, ch, op);
+        return;
+    }
+    if (target >= XFM_MACRO_SSG1 && target <= XFM_MACRO_SSG4) {
+        int op = target - XFM_MACRO_SSG1;
+        if (!m->live_patch_valid[ch]) return;
+        m->live_patches[ch].op[op].SSG = static_cast<uint8_t>(std::min(8, std::max(0, value)));
         song_write_opn_operator(m, ch, op);
         return;
     }
@@ -1467,7 +1509,7 @@ static void song_set_macro_enabled(xfm_module* m, int ch, int target, bool enabl
     if (begin <= 0 || end >= XFM_MACRO_TARGET_COUNT) return;
 
     for (int t = begin; t <= end; t++) {
-        uint32_t mask = song_macro_target_mask(t);
+        uint64_t mask = song_macro_target_mask(t);
         XfmMacroState& state = ch_state.macro_states[t];
         if (!enabled) {
             ch_state.macro_disabled_mask |= mask;
@@ -1570,7 +1612,7 @@ static void song_stop_active_macros(xfm_module* m, int ch)
 
 static int song_opn_dt_from_furnace(int value)
 {
-    static const int map[8] = {-3, -2, -1, 0, 1, 2, 3, 0};
+    static const int map[8] = {-1, -2, -3, 0, 1, 2, 3, 4};
     return map[value & 7];
 }
 
@@ -1809,7 +1851,7 @@ static void song_start_note_slide(XfmSongPattern& pat, XfmSongChannel& ch_state,
     int value = std::abs(packed);
     int speed = (value >> 4) & 0x0F;
     int semitones = value & 0x0F;
-    if (semitones <= 0) {
+    if (speed <= 0 || semitones <= 0) {
         ch_state.note_slide_active = false;
         return;
     }
@@ -1940,15 +1982,7 @@ static void song_process_row(xfm_module* m, int row_idx)
             ch_state.pending_has_note = false;
             ch_state.pending_is_off = false;
             ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
-            ch_state.portamento_active = false;
-            ch_state.pitch_slide_speed = 0;
-            ch_state.volume_slide_speed = 0;
-            ch_state.note_slide_active = false;
             ch_state.arp_offset = 0;
-            ch_state.vibrato_speed = 0;
-            ch_state.vibrato_depth = 0;
-            ch_state.tremolo_speed = 0;
-            ch_state.tremolo_depth = 0;
             if (ev.note == -3) song_release_macros(m, ch);
             else song_stop_active_macros(m, ch);
         } else if (ev.note >= 0) {

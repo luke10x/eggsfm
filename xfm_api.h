@@ -132,7 +132,7 @@ struct XfmSongOpnEffect {
 
 #define XFM_MAX_MACRO_VALUES 64
 #define XFM_MAX_MACROS 256
-#define XFM_MACRO_TARGET_COUNT 15
+#define XFM_MACRO_TARGET_COUNT 39
 
 typedef int xfm_macro_id;
 
@@ -151,7 +151,31 @@ typedef enum {
     XFM_MACRO_DT3  = 11,
     XFM_MACRO_DT4  = 12,
     XFM_MACRO_FB   = 13,
-    XFM_MACRO_ARP  = 14
+    XFM_MACRO_ARP  = 14,
+    XFM_MACRO_AR1  = 15,
+    XFM_MACRO_AR2  = 16,
+    XFM_MACRO_AR3  = 17,
+    XFM_MACRO_AR4  = 18,
+    XFM_MACRO_DR1  = 19,
+    XFM_MACRO_DR2  = 20,
+    XFM_MACRO_DR3  = 21,
+    XFM_MACRO_DR4  = 22,
+    XFM_MACRO_SR1  = 23,
+    XFM_MACRO_SR2  = 24,
+    XFM_MACRO_SR3  = 25,
+    XFM_MACRO_SR4  = 26,
+    XFM_MACRO_SL1  = 27,
+    XFM_MACRO_SL2  = 28,
+    XFM_MACRO_SL3  = 29,
+    XFM_MACRO_SL4  = 30,
+    XFM_MACRO_RR1  = 31,
+    XFM_MACRO_RR2  = 32,
+    XFM_MACRO_RR3  = 33,
+    XFM_MACRO_RR4  = 34,
+    XFM_MACRO_SSG1 = 35,
+    XFM_MACRO_SSG2 = 36,
+    XFM_MACRO_SSG3 = 37,
+    XFM_MACRO_SSG4 = 38
 } xfm_macro_target;
 
 struct XfmMacro {
@@ -231,7 +255,7 @@ struct XfmSongChannel {
     int             base_note;
     int             arp_offset;
     int             sample_in_tick;
-    uint32_t        macro_disabled_mask;
+    uint64_t        macro_disabled_mask;
     XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
     bool            live_patch_valid;
 };
@@ -311,6 +335,7 @@ public:
     static constexpr uint32_t YM_CLOCK = 7670453;
 
     static uint8_t dt_to_hw(int dt) {
+        if (dt == 4) return 4;
         if (dt < -3) dt = -3;
         if (dt > 3) dt = 3;
         return static_cast<uint8_t>(dt < 0 ? 8 + dt : dt);
