@@ -448,7 +448,7 @@ public:
     
     // Generate 'samples' stereo frames at given sample_rate using Bresenham
     // to maintain correct pitch at any output rate
-    void generate_buffer(int16_t* stream, int samples, int sample_rate) {
+    void generate_buffer(int16_t* stream, int samples, int sample_rate, int16_t **channel_streams = nullptr) {
 
         /*
         Clocking
@@ -461,13 +461,33 @@ public:
         
         for (int i = 0; i < samples; i++) {
             int16_t L, R;
+            ymfm::ym3438::output_data channels[6];
             do {
-                generate(&L, &R);
+                if (channel_streams)
+                {
+                    ymfm::ym3438::output_data out;
+                    chip.generate_channelized(&out, channels, 1);
+                    L = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[0])));
+                    R = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[1])));
+                }
+                else
+                {
+                    generate(&L, &R);
+                }
                 this->acc_err += sample_rate;
             } while (this->acc_err < REF_RATE);
             this->acc_err -= REF_RATE;
             stream[i * 2 + 0] = L;
             stream[i * 2 + 1] = R;
+            if (channel_streams)
+            {
+                for (int ch = 0; ch < 6; ch++)
+                {
+                    if (!channel_streams[ch]) continue;
+                    channel_streams[ch][i * 2 + 0] = static_cast<int16_t>(std::max(-32768, std::min(32767, channels[ch].data[0])));
+                    channel_streams[ch][i * 2 + 1] = static_cast<int16_t>(std::max(-32768, std::min(32767, channels[ch].data[1])));
+                }
+            }
         }
     }
 };
@@ -528,6 +548,7 @@ struct xfm_module {
     bool            live_patch_valid[6];
     int             live_patch_id[6];
     uint8_t         live_op_mask[6];
+    int16_t*        oscilloscope_channel_buffers[6];
 
     // LFO state
     bool            lfo_enable;

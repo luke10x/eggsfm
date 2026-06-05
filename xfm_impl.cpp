@@ -98,6 +98,7 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
     std::memset(m->channel_active, 0, sizeof(m->channel_active));
     std::memset(m->live_patches, 0, sizeof(m->live_patches));
     std::memset(m->live_patch_valid, 0, sizeof(m->live_patch_valid));
+    std::memset(m->oscilloscope_channel_buffers, 0, sizeof(m->oscilloscope_channel_buffers));
     for (int i = 0; i < 6; i++) {
         m->live_patch_id[i] = -1;
         m->live_op_mask[i] = 0x0F;
@@ -2786,7 +2787,17 @@ void xfm_mix_song(xfm_module* m, int16_t* stream, int frames)
         if (chunk <= 0) chunk = 1;
         if (chunk > frames - offset) chunk = frames - offset;
 
-        m->chip->generate_buffer(stream + offset * 2, chunk, m->sample_rate);
+        int16_t *scopeBuffers[6] = {};
+        int16_t **scope = nullptr;
+        for (int ch = 0; ch < 6; ch++)
+        {
+            if (m->oscilloscope_channel_buffers[ch])
+            {
+                scopeBuffers[ch] = m->oscilloscope_channel_buffers[ch] + offset * 2;
+                scope = scopeBuffers;
+            }
+        }
+        m->chip->generate_buffer(stream + offset * 2, chunk, m->sample_rate, scope);
         advance_song_time(m, chunk);
         offset += chunk;
     }
