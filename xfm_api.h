@@ -93,6 +93,17 @@ struct XfmSfxPattern {
     XfmSfxEvent*     rows;     // array of num_rows events
 };
 
+struct XfmMacroState {
+    int macro_id;
+    uint8_t pos;
+    bool active;
+    bool released;
+};
+
+#define XFM_MAX_MACRO_VALUES 64
+#define XFM_MAX_MACROS 256
+#define XFM_MACRO_TARGET_COUNT 39
+
 // Active SFX voice tracking
 struct XfmActiveSfx {
     int     sfx_id;         // which SFX is playing
@@ -122,6 +133,8 @@ struct XfmActiveSfx {
     double  target_hz;
     double  portamento_step_hz;
     bool    live_patch_valid;
+    uint64_t        macro_disabled_mask;
+    XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
 };
 
 // Song channel event
@@ -185,13 +198,6 @@ struct XfmMacro {
     uint8_t loop_start;
     uint8_t release_start;
     bool has_loop;
-};
-
-struct XfmMacroState {
-    int macro_id;
-    uint8_t pos;
-    bool active;
-    bool released;
 };
 
 struct XfmSongEvent {

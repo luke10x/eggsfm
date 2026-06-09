@@ -52,6 +52,11 @@ static inline int get_dynamic_gap(int sample_rate, int rows_until_next, int samp
     return std::min(max_gap, dynamic_gap);
 }
 
+static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id);
+static void sfx_release_macros(xfm_module* m, int voice_idx);
+static void sfx_stop_active_macros(xfm_module* m, int voice_idx);
+static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames);
+
 // =============================================================================
 // MODULE LIFETIME
 // =============================================================================
@@ -595,10 +600,12 @@ static void sfx_process_row(xfm_module* m, int voice_idx, int row_idx)
     sfx->pending_has_note = false;
     if (ev.note == -2 || ev.note == -3) {
         // OFF/REL note - key off and let the envelope release.
+        sfx_release_macros(m, voice_idx);
         m->chip->key_off(voice_idx);
         m->channel_active[voice_idx] = false;
     } else if (ev.note == -4) {
         // === hard cut - immediate silence, no release tail.
+        sfx_stop_active_macros(m, voice_idx);
         m->chip->hard_mute(voice_idx);
         m->channel_active[voice_idx] = false;
     } else if (ev.note >= 0) {
@@ -653,6 +660,11 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
         if (sfx.pending_gap == 0) {
             m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
             m->current_patch[voice_idx] = sfx.pending_patch_id;
+            m->live_patches[voice_idx] = m->patches[sfx.pending_patch_id];
+            m->live_patch_valid[voice_idx] = true;
+            m->live_patch_id[voice_idx] = sfx.pending_patch_id;
+            sfx.live_patch_valid = true;
+            sfx_start_patch_macros(m, voice_idx, sfx.pending_patch_id);
             // Re-apply LFO settings after loading patch
             m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
             double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
@@ -675,6 +687,11 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
         // Load patch and key on
         m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
         m->current_patch[voice_idx] = sfx.pending_patch_id;
+        m->live_patches[voice_idx] = m->patches[sfx.pending_patch_id];
+        m->live_patch_valid[voice_idx] = true;
+        m->live_patch_id[voice_idx] = sfx.pending_patch_id;
+        sfx.live_patch_valid = true;
+        sfx_start_patch_macros(m, voice_idx, sfx.pending_patch_id);
         // Re-apply LFO settings after loading patch
         m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
         double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
@@ -752,6 +769,7 @@ xfm_voice_id xfm_sfx_play(xfm_module* m, xfm_sfx_id id, int priority)
     }
     
     // Key off the voice immediately
+    sfx_stop_active_macros(m, best_voice);
     m->chip->key_off(best_voice);
     
     // Find a free active_sfx slot
@@ -787,6 +805,13 @@ xfm_voice_id xfm_sfx_play(xfm_module* m, xfm_sfx_id id, int priority)
     sfx.target_hz = 0.0;
     sfx.portamento_step_hz = 0.0;
     sfx.live_patch_valid = false;
+    sfx.macro_disabled_mask = 0;
+    for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
+        sfx.macro_states[target].macro_id = -1;
+        sfx.macro_states[target].pos = 0;
+        sfx.macro_states[target].active = false;
+        sfx.macro_states[target].released = false;
+    }
 
     // Update voice state
     m->voices[best_voice].active = true;
@@ -825,6 +850,8 @@ void xfm_sfx_stop(xfm_module* m, xfm_voice_id voice)
     m->live_patch_valid[voice] = false;
     m->live_patch_id[voice] = -1;
     m->live_op_mask[voice] = 0x0F;
+    m->active_song.channels[voice].arp_offset = 0;
+    m->active_song.channels[voice].sample_in_tick = 0;
 
     for (int slot = 0; slot < 6; slot++) {
         XfmActiveSfx& sfx = m->active_sfx[slot];
@@ -849,6 +876,13 @@ void xfm_sfx_stop(xfm_module* m, xfm_voice_id voice)
         sfx.target_hz = 0.0;
         sfx.portamento_step_hz = 0.0;
         sfx.live_patch_valid = false;
+        sfx.macro_disabled_mask = 0;
+        for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
+            sfx.macro_states[target].macro_id = -1;
+            sfx.macro_states[target].pos = 0;
+            sfx.macro_states[target].active = false;
+            sfx.macro_states[target].released = false;
+        }
     }
 }
 
@@ -874,9 +908,11 @@ static void update_sfx_voice(xfm_module* m, int slot)
 
     // Advance sample counter
     sfx.sample_in_row++;
+    sfx_advance_macros(m, voice, 1);
 
     // Check for scheduled auto key-off
     if (sfx.auto_off_scheduled && sfx.sample_in_row == sfx.auto_off_at_sample) {
+        sfx_release_macros(m, voice);
         m->chip->key_off(voice);
         m->channel_active[voice] = false;
         sfx.auto_off_scheduled = false;
@@ -895,6 +931,7 @@ static void update_sfx_voice(xfm_module* m, int slot)
 
         // SFX finished?
         if (sfx.rows_remaining <= 0) {
+            sfx_stop_active_macros(m, voice);
             m->chip->key_off(voice);
             m->voices[voice].active = false;
             m->voices[voice].priority = 0;
@@ -1031,7 +1068,10 @@ static void advance_sfx_time(xfm_module* m, int frames)
 {
     for (int slot = 0; slot < 6; slot++) {
         XfmActiveSfx& sfx = m->active_sfx[slot];
-        if (sfx.active) sfx.sample_in_row += frames;
+        if (sfx.active) {
+            sfx.sample_in_row += frames;
+            sfx_advance_macros(m, sfx.voice_idx, frames);
+        }
     }
 }
 
@@ -1497,6 +1537,116 @@ static void song_start_patch_macros(xfm_module* m, int ch, int patch_id)
         state.active = true;
         state.released = false;
         song_apply_macro_value(m, ch, target, m->macros[macro_id].values[0]);
+    }
+}
+
+static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id)
+{
+    if (!m || voice_idx < 0 || voice_idx >= 6 || patch_id < 0 || patch_id > 255) return;
+    XfmActiveSfx& sfx = m->active_sfx[voice_idx];
+
+    sfx.macro_disabled_mask = 0;
+    m->active_song.channels[voice_idx].arp_offset = 0;
+    m->active_song.channels[voice_idx].sample_in_tick = 0;
+    for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
+        XfmMacroState& state = sfx.macro_states[target];
+        state.macro_id = -1;
+        state.pos = 0;
+        state.active = false;
+        state.released = false;
+    }
+
+    for (int target = 1; target < XFM_MACRO_TARGET_COUNT; target++) {
+        int macro_id = m->patch_macros[patch_id][target];
+        if (macro_id < 0 || macro_id >= XFM_MAX_MACROS || !m->macro_present[macro_id]) continue;
+        if ((sfx.macro_disabled_mask & song_macro_target_mask(target)) != 0) continue;
+
+        XfmMacroState& state = sfx.macro_states[target];
+        state.macro_id = macro_id;
+        state.pos = 0;
+        state.active = true;
+        state.released = false;
+        song_apply_macro_value(m, voice_idx, target, m->macros[macro_id].values[0]);
+    }
+}
+
+static void sfx_release_macros(xfm_module* m, int voice_idx)
+{
+    if (!m || voice_idx < 0 || voice_idx >= 6) return;
+    XfmActiveSfx& sfx = m->active_sfx[voice_idx];
+
+    for (int target = 1; target < XFM_MACRO_TARGET_COUNT; target++) {
+        XfmMacroState& state = sfx.macro_states[target];
+        if (!state.active) continue;
+        if (state.macro_id < 0 || state.macro_id >= XFM_MAX_MACROS) continue;
+        if (!m->macro_present[state.macro_id]) continue;
+
+        const XfmMacro& macro = m->macros[state.macro_id];
+        state.released = true;
+        if (macro.release_start == 0xFF || macro.release_start >= macro.length) continue;
+
+        state.pos = macro.release_start;
+        song_apply_macro_value(m, voice_idx, target, macro.values[state.pos]);
+    }
+}
+
+static void sfx_stop_active_macros(xfm_module* m, int voice_idx)
+{
+    if (!m || voice_idx < 0 || voice_idx >= 6) return;
+    XfmActiveSfx& sfx = m->active_sfx[voice_idx];
+    for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
+        XfmMacroState& state = sfx.macro_states[target];
+        state.active = false;
+        state.released = false;
+        state.macro_id = -1;
+        state.pos = 0;
+    }
+    sfx.macro_disabled_mask = 0;
+    m->active_song.channels[voice_idx].arp_offset = 0;
+    m->active_song.channels[voice_idx].sample_in_tick = 0;
+}
+
+static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames)
+{
+    if (!m || !m->chip || voice_idx < 0 || voice_idx >= 6 || frames <= 0) return;
+    XfmActiveSfx& sfx = m->active_sfx[voice_idx];
+    if (!sfx.active) return;
+
+    XfmSfxPattern& pat = m->sfx_patterns[sfx.sfx_id];
+    if (pat.tick_rate <= 0) return;
+
+    XfmSongChannel& ch_state = m->active_song.channels[voice_idx];
+    ch_state.sample_in_tick += frames;
+    int samples_per_tick = std::max(1, m->sample_rate / std::max(1, pat.tick_rate));
+
+    while (ch_state.sample_in_tick >= samples_per_tick) {
+        ch_state.sample_in_tick -= samples_per_tick;
+        for (int target = 1; target < XFM_MACRO_TARGET_COUNT; target++) {
+            XfmMacroState& state = sfx.macro_states[target];
+            if (!state.active) continue;
+            if (state.macro_id < 0 || state.macro_id >= XFM_MAX_MACROS) continue;
+            if (!m->macro_present[state.macro_id]) continue;
+
+            const XfmMacro& macro = m->macros[state.macro_id];
+            if (macro.length == 0) continue;
+
+            int next_pos = state.pos + 1;
+            int loop_end = macro.length;
+            if (!state.released && macro.release_start != 0xFF && macro.release_start <= macro.length) {
+                loop_end = std::max(1, (int)macro.release_start);
+            }
+            if (!state.released && macro.has_loop && next_pos >= loop_end) {
+                next_pos = macro.loop_start;
+            } else if (next_pos >= macro.length) {
+                if (!state.released && macro.has_loop) next_pos = macro.loop_start;
+                else {
+                    state.active = false;
+                    continue;
+                }
+            }
+            state.pos = static_cast<uint8_t>(next_pos);
+            song_apply_macro_value(m, voice_idx, target, macro.values[state.pos]);
+        }
     }
 }
 
