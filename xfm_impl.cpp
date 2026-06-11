@@ -1638,11 +1638,12 @@ static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames)
             if (macro.length == 0) continue;
 
             int next_pos = state.pos + 1;
-            int loop_end = macro.length;
-            if (!state.released && macro.release_start != 0xFF && macro.release_start <= macro.length) {
-                loop_end = std::max(1, (int)macro.release_start);
+            const bool has_release = macro.release_start != 0xFF && macro.release_start < macro.length;
+            int hold_end = has_release ? (int)macro.release_start : macro.length;
+            if (!state.released && !macro.has_loop && has_release && next_pos >= hold_end) {
+                continue;
             }
-            if (!state.released && macro.has_loop && next_pos >= loop_end) {
+            if (!state.released && macro.has_loop && next_pos >= hold_end) {
                 next_pos = macro.loop_start;
             } else if (next_pos >= macro.length) {
                 if (!state.released && macro.has_loop) next_pos = macro.loop_start;
@@ -1719,11 +1720,12 @@ static void song_advance_macros(xfm_module* m, int frames)
                 if (macro.length == 0) continue;
 
                 int next_pos = state.pos + 1;
-                int loop_end = macro.length;
-                if (!state.released && macro.release_start != 0xFF && macro.release_start <= macro.length) {
-                    loop_end = std::max(1, (int)macro.release_start);
+                const bool has_release = macro.release_start != 0xFF && macro.release_start < macro.length;
+                int hold_end = has_release ? (int)macro.release_start : macro.length;
+                if (!state.released && !macro.has_loop && has_release && next_pos >= hold_end) {
+                    continue;
                 }
-                if (!state.released && macro.has_loop && next_pos >= loop_end) {
+                if (!state.released && macro.has_loop && next_pos >= hold_end) {
                     next_pos = macro.loop_start;
                 } else if (next_pos >= macro.length) {
                     if (!state.released && macro.has_loop) next_pos = macro.loop_start;
