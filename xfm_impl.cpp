@@ -1808,6 +1808,49 @@ static void song_set_opn_operator_tl(xfm_module* m, int ch, int op, int value)
     else song_write_opn_operator(m, ch, op);
 }
 
+void xfm_patch_refresh_live(xfm_module* m, xfm_patch_id patch_id)
+{
+    if (!m || !m->chip || patch_id < 0 || patch_id > 255 || !m->patch_present[patch_id]) return;
+
+    for (int ch = 0; ch < 6; ch++) {
+        const bool currentUsesPatch = m->current_patch[ch] == patch_id;
+        const bool liveUsesPatch = m->live_patch_valid[ch] && m->live_patch_id[ch] == patch_id;
+        const bool songUsesPatch =
+            m->active_song.active && m->active_song.channels[ch].current_patch == patch_id;
+        const bool sfxUsesPatch =
+            m->active_sfx[ch].active &&
+            (m->active_sfx[ch].last_patch_id == patch_id ||
+             m->active_sfx[ch].pending_patch_id == patch_id ||
+             currentUsesPatch);
+        const bool activeNow = m->channel_active[ch] || songUsesPatch || sfxUsesPatch;
+
+        if (!currentUsesPatch && !liveUsesPatch && !songUsesPatch && !sfxUsesPatch) continue;
+
+        if (!activeNow) {
+            if (currentUsesPatch) m->current_patch[ch] = -1;
+            if (liveUsesPatch || currentUsesPatch) {
+                m->live_patch_valid[ch] = false;
+                m->live_patch_id[ch] = -1;
+            }
+            continue;
+        }
+
+        m->live_patches[ch] = m->patches[patch_id];
+        m->live_patch_valid[ch] = true;
+        m->live_patch_id[ch] = patch_id;
+        if (songUsesPatch) m->active_song.channels[ch].live_patch_valid = true;
+        if (sfxUsesPatch) m->active_sfx[ch].live_patch_valid = true;
+
+        for (int op = 0; op < 4; op++) {
+            song_write_opn_operator(m, ch, op);
+        }
+        song_write_opn_channel_regs(m, ch);
+        song_write_channel_tremolo(m, ch, 0);
+    }
+
+    m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
+}
+
 static void song_stop_patch_morph(xfm_module* m, int ch)
 {
     if (!m || ch < 0 || ch >= 6) return;

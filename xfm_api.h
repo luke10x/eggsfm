@@ -697,6 +697,12 @@ void xfm_module_set_lfo(xfm_module* m, bool enable, int freq);
 void xfm_module_reload_patches(xfm_module* m);
 
 /**
+ * Push an updated patch into any currently sounding voices/channels that use it,
+ * and invalidate inactive cached voices so their next note reloads the patch.
+ */
+void xfm_patch_refresh_live(xfm_module* m, xfm_patch_id patch_id);
+
+/**
  * @brief Reset module state for clean export
  *
  * Call this before exporting SFX to ensure no state leakage
