@@ -200,6 +200,31 @@ struct XfmMacro {
     bool has_loop;
 };
 
+typedef struct xfm_patch_opn_operator
+{
+    int8_t  DT;     /* detune (-3..+3) */
+    uint8_t MUL;    /* frequency multiplier */
+    uint8_t TL;     /* total level */
+    uint8_t RS;     /* rate scale */
+    uint8_t AR;     /* attack rate */
+    uint8_t AM;     /* amplitude modulation enable */
+    uint8_t DR;     /* decay rate */
+    uint8_t SR;     /* sustain rate */
+    uint8_t SL;     /* sustain level */
+    uint8_t RR;     /* release rate */
+    uint8_t SSG;    /* SSG-EG (OPN specific) */
+} xfm_patch_opn_operator;
+
+typedef struct xfm_patch_opn
+{
+    uint8_t ALG;     /* algorithm */
+    uint8_t FB;      /* feedback */
+    uint8_t AMS;     /* AM sensitivity (0-3) */
+    uint8_t FMS;     /* FM sensitivity (0-7) */
+
+    xfm_patch_opn_operator op[4]; /* 4 operators */
+} xfm_patch_opn;
+
 struct XfmSongEvent {
     int     note;           // MIDI note, -1 = none, -2 = off, -3 = release, -4 = hard cut
     int     patch_id;       // patch/instrument ID, -1 = inherit
@@ -264,6 +289,12 @@ struct XfmSongChannel {
     uint64_t        macro_disabled_mask;
     XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
     bool            live_patch_valid;
+    bool            patch_morph_active;
+    bool            patch_morph_pending_start;
+    uint8_t         patch_morph_speed;
+    uint16_t        patch_morph_phase;
+    int             patch_morph_target_patch_id;
+    xfm_patch_opn   patch_morph_target;
 };
 
 // Song pattern (multi-channel)
@@ -309,31 +340,6 @@ struct XfmPendingSong {
 // =============================================================================
 // YM2612 Chip Wrapper (same as old EggsFMChip, standalone)
 // =============================================================================
-
-typedef struct xfm_patch_opn_operator
-{
-    int8_t  DT;     /* detune (-3..+3) */
-    uint8_t MUL;    /* frequency multiplier */
-    uint8_t TL;     /* total level */
-    uint8_t RS;     /* rate scale */
-    uint8_t AR;     /* attack rate */
-    uint8_t AM;     /* amplitude modulation enable */
-    uint8_t DR;     /* decay rate */
-    uint8_t SR;     /* sustain rate */
-    uint8_t SL;     /* sustain level */
-    uint8_t RR;     /* release rate */
-    uint8_t SSG;    /* SSG-EG (OPN specific) */
-} xfm_patch_opn_operator;
-
-typedef struct xfm_patch_opn
-{
-    uint8_t ALG;     /* algorithm */
-    uint8_t FB;      /* feedback */
-    uint8_t AMS;     /* AM sensitivity (0-3) */
-    uint8_t FMS;     /* FM sensitivity (0-7) */
-
-    xfm_patch_opn_operator op[4]; /* 4 operators */
-} xfm_patch_opn;
 
 class XfmChipOpn
 {

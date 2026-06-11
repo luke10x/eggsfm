@@ -200,6 +200,12 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
             m->active_song.channels[ch].macro_states[target].released = false;
         }
         m->active_song.channels[ch].live_patch_valid = false;
+        m->active_song.channels[ch].patch_morph_active = false;
+        m->active_song.channels[ch].patch_morph_pending_start = false;
+        m->active_song.channels[ch].patch_morph_speed = 0;
+        m->active_song.channels[ch].patch_morph_phase = 0;
+        m->active_song.channels[ch].patch_morph_target_patch_id = -1;
+        m->active_song.channels[ch].patch_morph_target = {};
     }
 
     // Initialize pending song
@@ -1259,6 +1265,7 @@ xfm_song_id xfm_song_declare(xfm_module* m, xfm_song_id id, const char* pattern_
                                 code == 0x10 || code == 0x11 ||
                                 (code >= 0x12 && code <= 0x16) ||
                                 (code >= 0x19 && code <= 0x1D) ||
+                                code == 0xEE ||
                                 code == 0x30 ||
                                 (code >= 0x50 && code <= 0x5F) ||
                                 (code >= 0x60 && code <= 0x63);
@@ -1682,6 +1689,10 @@ static void song_set_macro_enabled(xfm_module* m, int ch, int target, bool enabl
     }
 }
 
+static void song_stop_patch_morph(xfm_module* m, int ch);
+static void song_start_patch_morph(xfm_module* m, int ch, int target_patch_id, int speed);
+static bool song_advance_patch_morph_tick(xfm_module* m, int ch);
+
 static void song_advance_macros(xfm_module* m, int frames)
 {
     if (!m || !m->active_song.active || frames <= 0) return;
@@ -1723,6 +1734,10 @@ static void song_advance_macros(xfm_module* m, int frames)
                 }
                 state.pos = static_cast<uint8_t>(next_pos);
                 song_apply_macro_value(m, ch, target, macro.values[state.pos]);
+            }
+
+            if (ch_state.patch_morph_active) {
+                song_advance_patch_morph_tick(m, ch);
             }
         }
     }
@@ -1793,6 +1808,145 @@ static void song_set_opn_operator_tl(xfm_module* m, int ch, int op, int value)
     else song_write_opn_operator(m, ch, op);
 }
 
+static void song_stop_patch_morph(xfm_module* m, int ch)
+{
+    if (!m || ch < 0 || ch >= 6) return;
+    XfmSongChannel& ch_state = m->active_song.channels[ch];
+    ch_state.patch_morph_active = false;
+    ch_state.patch_morph_pending_start = false;
+    ch_state.patch_morph_speed = 0;
+    ch_state.patch_morph_phase = 0;
+    ch_state.patch_morph_target_patch_id = -1;
+    ch_state.patch_morph_target = {};
+}
+
+static void song_start_patch_morph(xfm_module* m, int ch, int target_patch_id, int speed)
+{
+    if (!m || !m->chip || ch < 0 || ch >= 6) return;
+    if (target_patch_id < 0 || target_patch_id > 255 || !m->patch_present[target_patch_id] || speed <= 0) return;
+
+    XfmSongChannel& ch_state = m->active_song.channels[ch];
+    if (!m->live_patch_valid[ch]) {
+        int source_patch_id = ch_state.current_patch;
+        if (source_patch_id >= 0 && source_patch_id <= 255 && m->patch_present[source_patch_id]) {
+            m->live_patches[ch] = m->patches[source_patch_id];
+            m->live_patch_valid[ch] = true;
+            m->live_patch_id[ch] = source_patch_id;
+        } else {
+            m->live_patches[ch] = m->patches[target_patch_id];
+            m->live_patch_valid[ch] = true;
+            m->live_patch_id[ch] = target_patch_id;
+        }
+        ch_state.live_patch_valid = true;
+    }
+
+    ch_state.patch_morph_target = m->patches[target_patch_id];
+    ch_state.patch_morph_target_patch_id = target_patch_id;
+    ch_state.patch_morph_speed = static_cast<uint8_t>(std::min(255, std::max(1, speed)));
+    ch_state.patch_morph_phase = 0;
+    ch_state.patch_morph_pending_start = false;
+    ch_state.patch_morph_active = true;
+
+    m->live_patches[ch].ALG = ch_state.patch_morph_target.ALG;
+    for (int op = 0; op < 4; op++) {
+        m->live_patches[ch].op[op].AM = ch_state.patch_morph_target.op[op].AM;
+        m->live_patches[ch].op[op].SSG = ch_state.patch_morph_target.op[op].SSG;
+        song_write_opn_operator(m, ch, op);
+    }
+    song_write_opn_channel_regs(m, ch);
+    song_write_channel_tremolo(m, ch, 0);
+}
+
+static int song_patch_morph_step_value(int current, int target)
+{
+    int delta = target - current;
+    if (delta == 0) return current;
+    return current + (delta > 0 ? 1 : -1);
+}
+
+static bool song_patch_morph_is_at_target(const xfm_patch_opn& live, const xfm_patch_opn& target)
+{
+    if (live.FB != target.FB || live.AMS != target.AMS || live.FMS != target.FMS) return false;
+    for (int op = 0; op < 4; op++) {
+        if (live.op[op].TL != target.op[op].TL) return false;
+        if (live.op[op].AR != target.op[op].AR) return false;
+        if (live.op[op].DR != target.op[op].DR) return false;
+        if (live.op[op].SR != target.op[op].SR) return false;
+        if (live.op[op].RR != target.op[op].RR) return false;
+        if (live.op[op].SL != target.op[op].SL) return false;
+        if (live.op[op].MUL != target.op[op].MUL) return false;
+        if (live.op[op].DT != target.op[op].DT) return false;
+        if (live.op[op].RS != target.op[op].RS) return false;
+    }
+    return true;
+}
+
+static bool song_advance_patch_morph_tick(xfm_module* m, int ch)
+{
+    if (!m || !m->chip || ch < 0 || ch >= 6) return false;
+    XfmSongChannel& ch_state = m->active_song.channels[ch];
+    if (!ch_state.patch_morph_active || !m->live_patch_valid[ch]) return false;
+
+    bool changed = false;
+    xfm_patch_opn& live = m->live_patches[ch];
+    const xfm_patch_opn& target = ch_state.patch_morph_target;
+    ch_state.patch_morph_phase = static_cast<uint16_t>(ch_state.patch_morph_phase + ch_state.patch_morph_speed);
+    int passes = ch_state.patch_morph_phase / 255;
+    ch_state.patch_morph_phase = static_cast<uint16_t>(ch_state.patch_morph_phase % 255);
+
+    if (passes <= 0) {
+        if (song_patch_morph_is_at_target(live, target)) {
+            ch_state.patch_morph_active = false;
+        }
+        return false;
+    }
+
+    auto step_u8 = [&](uint8_t& field, int targetValue) {
+        int next = song_patch_morph_step_value((int)field, targetValue);
+        if (next != (int)field) {
+            field = static_cast<uint8_t>(next);
+            changed = true;
+        }
+    };
+    auto step_i8 = [&](int8_t& field, int targetValue) {
+        int next = song_patch_morph_step_value((int)field, targetValue);
+        if (next != (int)field) {
+            field = static_cast<int8_t>(next);
+            changed = true;
+        }
+    };
+
+    for (int pass = 0; pass < passes; pass++) {
+        step_u8(live.FB, target.FB);
+        step_u8(live.AMS, target.AMS);
+        step_u8(live.FMS, target.FMS);
+        for (int op = 0; op < 4; op++) {
+            step_u8(live.op[op].TL, target.op[op].TL);
+            step_u8(live.op[op].AR, target.op[op].AR);
+            step_u8(live.op[op].DR, target.op[op].DR);
+            step_u8(live.op[op].SR, target.op[op].SR);
+            step_u8(live.op[op].RR, target.op[op].RR);
+            step_u8(live.op[op].SL, target.op[op].SL);
+            step_u8(live.op[op].MUL, target.op[op].MUL);
+            step_i8(live.op[op].DT, target.op[op].DT);
+            step_u8(live.op[op].RS, target.op[op].RS);
+        }
+    }
+
+    if (song_patch_morph_is_at_target(live, target)) {
+        ch_state.patch_morph_active = false;
+    }
+
+    if (!changed) return false;
+
+    for (int op = 0; op < 4; op++) {
+        song_write_opn_operator(m, ch, op);
+    }
+    song_write_opn_channel_regs(m, ch);
+    song_write_channel_tremolo(m, ch, 0);
+    return true;
+}
+
 static void song_apply_opn_effect(xfm_module* m, int ch, const XfmSongOpnEffect& effect)
 {
     if (!m || !m->chip || ch < 0 || ch >= 6) return;
@@ -1810,6 +1964,10 @@ static void song_apply_opn_effect(xfm_module* m, int ch, const XfmSongOpnEffect&
     int value = effect.value;
     int x = (value >> 4) & 0x0F;
     int y = value & 0x0F;
+
+    if (code == 0xEE) {
+        return;
+    }
 
     if (code == 0x10) {
         xfm_module_set_lfo(m, x != 0, y);
@@ -1960,6 +2118,13 @@ static void song_key_on_channel(xfm_module* m, int ch, XfmSongChannel& ch_state)
     song_write_channel_frequency(m, ch, ch_state);
     m->chip->key_on(ch);
     m->channel_active[ch] = true;
+    if (ch_state.patch_morph_pending_start &&
+        ch_state.patch_morph_target_patch_id >= 0 &&
+        ch_state.patch_morph_target_patch_id <= 255 &&
+        m->patch_present[ch_state.patch_morph_target_patch_id])
+    {
+        song_start_patch_morph(m, ch, ch_state.patch_morph_target_patch_id, ch_state.patch_morph_speed);
+    }
     ch_state.pending_has_note = false;
     ch_state.wait_for_next_row = false;
     ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
@@ -2052,14 +2217,41 @@ static void song_process_row(xfm_module* m, int row_idx)
     for (int ch = 0; ch < pat.num_channels && ch < 6; ch++) {
         XfmSongEvent& ev = pat.rows[row_idx][ch];
         XfmSongChannel& ch_state = song.channels[ch];
+        const XfmSongOpnEffect* morph_effect = nullptr;
+        for (int i = 0; i < ev.opn_effect_count; i++) {
+            if (ev.opn_effects[i].code == 0xEE) {
+                morph_effect = &ev.opn_effects[i];
+                break;
+            }
+        }
+        const bool morph_cancel_requested = morph_effect && morph_effect->value == 0;
+        const bool morph_start_requested =
+            morph_effect &&
+            morph_effect->value != 0 &&
+            ev.patch_id >= 0 &&
+            ev.patch_id <= 255 &&
+            m->patch_present[ev.patch_id];
 
         // Update instrument and volume if specified
         if (ev.patch_id >= 0) {
-            ch_state.current_patch = ev.patch_id;
-            m->live_patch_valid[ch] = false;
-            m->live_patch_id[ch] = -1;
-            m->live_op_mask[ch] = 0x0F;
-            ch_state.live_patch_valid = false;
+            if (!morph_start_requested) {
+                ch_state.current_patch = ev.patch_id;
+                if (ch_state.patch_morph_active && ev.note < 0 && ev.note != -2 && ev.note != -3 && ev.note != -4) {
+                    if (m->channel_active[ch]) {
+                        song_load_channel_patch(m, ch, ch_state.current_patch, ch_state.current_volume);
+                    } else {
+                        m->live_patch_valid[ch] = false;
+                        m->live_patch_id[ch] = -1;
+                        m->live_op_mask[ch] = 0x0F;
+                        ch_state.live_patch_valid = false;
+                    }
+                } else {
+                    m->live_patch_valid[ch] = false;
+                    m->live_patch_id[ch] = -1;
+                    m->live_op_mask[ch] = 0x0F;
+                    ch_state.live_patch_valid = false;
+                }
+            }
         }
         if (ev.volume >= 0) {
             ch_state.current_volume = ev.volume;
@@ -2120,6 +2312,7 @@ static void song_process_row(xfm_module* m, int row_idx)
             song_set_macro_enabled(m, ch, ev.macro_enable, true);
         }
         for (int i = 0; i < ev.opn_effect_count; i++) {
+            if (ev.opn_effects[i].code == 0xEE) continue;
             song_apply_opn_effect(m, ch, ev.opn_effects[i]);
         }
 
@@ -2139,43 +2332,64 @@ static void song_process_row(xfm_module* m, int row_idx)
         } else if (ev.note >= 0) {
             if (ch_state.portamento_speed > 0 && m->channel_active[ch]) {
                 song_start_portamento(m, pat, ch, ch_state, ev.note);
-                continue;
-            }
-
-            if (ch_state.legato_enabled && song_apply_legato_note(m, ch, ch_state, ev.note)) {
-                continue;
-            }
-
-            // New note on this channel
-            // Check if channel is still playing from previous row
-            bool was_playing = m->channel_active[ch];
-            
-            // Key off happens at sample 1 of this row in update_song()
-            // The new note will wait until end of this row (simulates manual OFF row)
-            ch_state.wait_for_next_row = was_playing;
-
-            if (!was_playing) {
-                ch_state.pending_gap = 0;
             } else {
-                // Look ahead to find next note on this channel
-                int next_note_row = find_next_note_row(pat, row_idx, ch);
+                bool handled_note = false;
+                if (ch_state.legato_enabled && song_apply_legato_note(m, ch, ch_state, ev.note)) {
+                    handled_note = true;
+                }
 
-                // Calculate gap for clean release
-                if (next_note_row >= 0) {
-                    int rows_until_next = next_note_row - row_idx;
-                    ch_state.pending_gap = get_dynamic_gap(m->sample_rate, rows_until_next, pat.samples_per_row);
+                if (!handled_note) {
+                    // New note on this channel
+                    // Check if channel is still playing from previous row
+                    bool was_playing = m->channel_active[ch];
+                    
+                    // Key off happens at sample 1 of this row in update_song()
+                    // The new note will wait until end of this row (simulates manual OFF row)
+                    ch_state.wait_for_next_row = was_playing;
+
+                    if (!was_playing) {
+                        ch_state.pending_gap = 0;
+                    } else {
+                        // Look ahead to find next note on this channel
+                        int next_note_row = find_next_note_row(pat, row_idx, ch);
+
+                        // Calculate gap for clean release
+                        if (next_note_row >= 0) {
+                            int rows_until_next = next_note_row - row_idx;
+                            ch_state.pending_gap = get_dynamic_gap(m->sample_rate, rows_until_next, pat.samples_per_row);
+                        } else {
+                            ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
+                        }
+                    }
+
+                    // Mark for key-on after gap (or at end of row if waiting)
+                    int note_patch = ch_state.current_patch;
+                    if (note_patch < 0 && morph_start_requested) {
+                        note_patch = ev.patch_id;
+                    }
+                    ch_state.pending_has_note = true;
+                    ch_state.pending_note = ev.note;
+                    ch_state.pending_patch = note_patch;
+                    ch_state.pending_volume = ch_state.current_volume;
                 } else {
-                    ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
+                    ch_state.pending_has_note = false;
                 }
             }
-
-            // Mark for key-on after gap (or at end of row if waiting)
-            ch_state.pending_has_note = true;
-            ch_state.pending_note = ev.note;
-            ch_state.pending_patch = ch_state.current_patch;
-            ch_state.pending_volume = ch_state.current_volume;
         } else {
             // ev.note == -1: no new note, keep previous state
+        }
+
+        if (morph_cancel_requested) {
+            song_stop_patch_morph(m, ch);
+        } else if (morph_start_requested) {
+            if (ev.note >= 0 && ch_state.pending_has_note) {
+                ch_state.patch_morph_pending_start = true;
+                ch_state.patch_morph_speed = morph_effect->value;
+                ch_state.patch_morph_target_patch_id = ev.patch_id;
+                ch_state.patch_morph_target = m->patches[ev.patch_id];
+            } else {
+                song_start_patch_morph(m, ch, ev.patch_id, morph_effect->value);
+            }
         }
     }
 }
@@ -2230,6 +2444,12 @@ static void song_reset_active_channels(xfm_module* m)
             ch_state.macro_states[target].released = false;
         }
         ch_state.live_patch_valid = false;
+        ch_state.patch_morph_active = false;
+        ch_state.patch_morph_pending_start = false;
+        ch_state.patch_morph_speed = 0;
+        ch_state.patch_morph_phase = 0;
+        ch_state.patch_morph_target_patch_id = -1;
+        ch_state.patch_morph_target = {};
     }
 }
 
@@ -2349,6 +2569,12 @@ void xfm_song_play(xfm_module* m, xfm_song_id id, bool loop)
             m->active_song.channels[ch].macro_states[target].released = false;
         }
         m->active_song.channels[ch].live_patch_valid = false;
+        m->active_song.channels[ch].patch_morph_active = false;
+        m->active_song.channels[ch].patch_morph_pending_start = false;
+        m->active_song.channels[ch].patch_morph_speed = 0;
+        m->active_song.channels[ch].patch_morph_phase = 0;
+        m->active_song.channels[ch].patch_morph_target_patch_id = -1;
+        m->active_song.channels[ch].patch_morph_target = {};
     }
 
     // Process first row (sets up pending notes - will be triggered in update_song)
