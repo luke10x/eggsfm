@@ -56,6 +56,7 @@ static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id);
 static void sfx_release_macros(xfm_module* m, int voice_idx);
 static void sfx_stop_active_macros(xfm_module* m, int voice_idx);
 static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames);
+static void song_write_channel_frequency(xfm_module* m, int ch, const XfmSongChannel& ch_state);
 
 // =============================================================================
 // MODULE LIFETIME
@@ -674,7 +675,12 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
             // Re-apply LFO settings after loading patch
             m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
             double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
-            m->chip->set_frequency(voice_idx, hz, 0);
+            XfmSongChannel& ch_state = m->active_song.channels[voice_idx];
+            ch_state.base_note = sfx.pending_note;
+            ch_state.current_hz = hz;
+            ch_state.target_hz = hz;
+            ch_state.portamento_active = false;
+            song_write_channel_frequency(m, voice_idx, ch_state);
             m->chip->key_on(voice_idx);
             sfx.current_hz = hz;
             sfx.target_hz = hz;
@@ -701,7 +707,12 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
         // Re-apply LFO settings after loading patch
         m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
         double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
-        m->chip->set_frequency(voice_idx, hz, 0);
+        XfmSongChannel& ch_state = m->active_song.channels[voice_idx];
+        ch_state.base_note = sfx.pending_note;
+        ch_state.current_hz = hz;
+        ch_state.target_hz = hz;
+        ch_state.portamento_active = false;
+        song_write_channel_frequency(m, voice_idx, ch_state);
         m->chip->key_on(voice_idx);
         sfx.current_hz = hz;
         sfx.target_hz = hz;
