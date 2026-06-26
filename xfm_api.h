@@ -102,7 +102,7 @@ struct XfmMacroState {
 
 #define XFM_MAX_MACRO_VALUES 64
 #define XFM_MAX_MACROS 256
-#define XFM_MACRO_TARGET_COUNT 39
+#define XFM_MACRO_TARGET_COUNT 43
 
 // Active SFX voice tracking
 struct XfmActiveSfx {
@@ -145,7 +145,7 @@ struct XfmSongOpnEffect {
 
 #define XFM_MAX_MACRO_VALUES 64
 #define XFM_MAX_MACROS 256
-#define XFM_MACRO_TARGET_COUNT 39
+#define XFM_MACRO_TARGET_COUNT 43
 
 typedef int xfm_macro_id;
 
@@ -165,30 +165,34 @@ typedef enum {
     XFM_MACRO_DT4  = 12,
     XFM_MACRO_FB   = 13,
     XFM_MACRO_ARP  = 14,
-    XFM_MACRO_AR1  = 15,
-    XFM_MACRO_AR2  = 16,
-    XFM_MACRO_AR3  = 17,
-    XFM_MACRO_AR4  = 18,
-    XFM_MACRO_DR1  = 19,
-    XFM_MACRO_DR2  = 20,
-    XFM_MACRO_DR3  = 21,
-    XFM_MACRO_DR4  = 22,
-    XFM_MACRO_SR1  = 23,
-    XFM_MACRO_SR2  = 24,
-    XFM_MACRO_SR3  = 25,
-    XFM_MACRO_SR4  = 26,
-    XFM_MACRO_SL1  = 27,
-    XFM_MACRO_SL2  = 28,
-    XFM_MACRO_SL3  = 29,
-    XFM_MACRO_SL4  = 30,
-    XFM_MACRO_RR1  = 31,
-    XFM_MACRO_RR2  = 32,
-    XFM_MACRO_RR3  = 33,
-    XFM_MACRO_RR4  = 34,
-    XFM_MACRO_SSG1 = 35,
-    XFM_MACRO_SSG2 = 36,
-    XFM_MACRO_SSG3 = 37,
-    XFM_MACRO_SSG4 = 38
+    XFM_MACRO_PAN  = 15,
+    XFM_MACRO_PITCH = 16,
+    XFM_MACRO_RELATIVE = 17,
+    XFM_MACRO_PHASE_RESET = 18,
+    XFM_MACRO_AR1  = 19,
+    XFM_MACRO_AR2  = 20,
+    XFM_MACRO_AR3  = 21,
+    XFM_MACRO_AR4  = 22,
+    XFM_MACRO_DR1  = 23,
+    XFM_MACRO_DR2  = 24,
+    XFM_MACRO_DR3  = 25,
+    XFM_MACRO_DR4  = 26,
+    XFM_MACRO_SR1  = 27,
+    XFM_MACRO_SR2  = 28,
+    XFM_MACRO_SR3  = 29,
+    XFM_MACRO_SR4  = 30,
+    XFM_MACRO_SL1  = 31,
+    XFM_MACRO_SL2  = 32,
+    XFM_MACRO_SL3  = 33,
+    XFM_MACRO_SL4  = 34,
+    XFM_MACRO_RR1  = 35,
+    XFM_MACRO_RR2  = 36,
+    XFM_MACRO_RR3  = 37,
+    XFM_MACRO_RR4  = 38,
+    XFM_MACRO_SSG1 = 39,
+    XFM_MACRO_SSG2 = 40,
+    XFM_MACRO_SSG3 = 41,
+    XFM_MACRO_SSG4 = 42
 } xfm_macro_target;
 
 struct XfmMacro {
@@ -283,6 +287,9 @@ struct XfmSongChannel {
     int             tremolo_depth;
     double          tremolo_phase;
     bool            envelope_hard_reset;
+    uint8_t         macro_pan;
+    int             pitch_macro_cents;
+    int             relative_pitch_macro_cents;
     int             base_note;
     int             arp_offset;
     int             sample_in_tick;

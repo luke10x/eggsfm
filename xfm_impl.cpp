@@ -190,6 +190,9 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
         m->active_song.channels[ch].tremolo_depth = 0;
         m->active_song.channels[ch].tremolo_phase = 0.0;
         m->active_song.channels[ch].envelope_hard_reset = false;
+        m->active_song.channels[ch].macro_pan = 3;
+        m->active_song.channels[ch].pitch_macro_cents = 0;
+        m->active_song.channels[ch].relative_pitch_macro_cents = 0;
         m->active_song.channels[ch].base_note = -1;
         m->active_song.channels[ch].arp_offset = 0;
         m->active_song.channels[ch].sample_in_tick = 0;
@@ -300,6 +303,10 @@ void xfm_module_reset_state(xfm_module* m)
     m->active_song.rows_remaining = 0;
     for (int ch = 0; ch < 6; ch++) {
         m->active_song.channels[ch].envelope_hard_reset = false;
+        m->active_song.channels[ch].macro_pan = 3;
+        m->active_song.channels[ch].pitch_macro_cents = 0;
+        m->active_song.channels[ch].relative_pitch_macro_cents = 0;
+        m->active_song.channels[ch].fine_pitch_cents = 0;
         m->active_song.channels[ch].base_note = -1;
         m->active_song.channels[ch].arp_offset = 0;
         m->active_song.channels[ch].sample_in_tick = 0;
@@ -867,6 +874,10 @@ void xfm_sfx_stop(xfm_module* m, xfm_voice_id voice)
     m->live_patch_valid[voice] = false;
     m->live_patch_id[voice] = -1;
     m->live_op_mask[voice] = 0x0F;
+    m->active_song.channels[voice].macro_pan = 3;
+    m->active_song.channels[voice].pitch_macro_cents = 0;
+    m->active_song.channels[voice].relative_pitch_macro_cents = 0;
+    m->active_song.channels[voice].fine_pitch_cents = 0;
     m->active_song.channels[voice].arp_offset = 0;
     m->active_song.channels[voice].sample_in_tick = 0;
 
@@ -1437,8 +1448,9 @@ static void song_write_opn_channel_regs(xfm_module* m, int ch)
     const uint8_t port = (ch >= 3) ? 1 : 0;
     const int hwch = ch % 3;
     const xfm_patch_opn& patch = m->live_patches[ch];
+    const uint8_t pan = m->active_song.channels[ch].macro_pan & 0x03;
     m->chip->write(port, 0xB0 + hwch, ((patch.FB & 0x07) << 3) | (patch.ALG & 0x07));
-    m->chip->write(port, 0xB4 + hwch, 0xC0 | ((patch.AMS & 0x03) << 4) | (patch.FMS & 0x07));
+    m->chip->write(port, 0xB4 + hwch, (pan << 6) | ((patch.AMS & 0x03) << 4) | (patch.FMS & 0x07));
 }
 
 static void song_set_opn_operator_tl(xfm_module* m, int ch, int op, int value);
@@ -1526,6 +1538,28 @@ static void song_apply_macro_value(xfm_module* m, int ch, int target, int value)
         if (m->channel_active[ch]) {
             song_write_channel_frequency(m, ch, ch_state);
         }
+        return;
+    }
+    if (target == XFM_MACRO_PAN) {
+        ch_state.macro_pan = static_cast<uint8_t>(std::min(3, std::max(0, value)));
+        if (m->live_patch_valid[ch]) song_write_opn_channel_regs(m, ch);
+        return;
+    }
+    if (target == XFM_MACRO_PITCH) {
+        ch_state.pitch_macro_cents = value;
+        ch_state.fine_pitch_cents = ch_state.pitch_macro_cents + ch_state.relative_pitch_macro_cents;
+        if (m->channel_active[ch]) song_write_channel_frequency(m, ch, ch_state);
+        return;
+    }
+    if (target == XFM_MACRO_RELATIVE) {
+        ch_state.relative_pitch_macro_cents += value;
+        ch_state.fine_pitch_cents = ch_state.pitch_macro_cents + ch_state.relative_pitch_macro_cents;
+        if (m->channel_active[ch]) song_write_channel_frequency(m, ch, ch_state);
+        return;
+    }
+    if (target == XFM_MACRO_PHASE_RESET) {
+        ch_state.envelope_hard_reset = value != 0;
+        return;
     }
 }
 
@@ -1535,6 +1569,10 @@ static void song_start_patch_macros(xfm_module* m, int ch, int patch_id)
     XfmSongChannel& ch_state = m->active_song.channels[ch];
 
     ch_state.arp_offset = 0;
+    ch_state.macro_pan = 3;
+    ch_state.pitch_macro_cents = 0;
+    ch_state.relative_pitch_macro_cents = 0;
+    ch_state.fine_pitch_cents = 0;
     ch_state.sample_in_tick = 0;
     for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
         XfmMacroState& state = ch_state.macro_states[target];
@@ -1564,6 +1602,10 @@ static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id)
     XfmActiveSfx& sfx = m->active_sfx[voice_idx];
 
     sfx.macro_disabled_mask = 0;
+    m->active_song.channels[voice_idx].macro_pan = 3;
+    m->active_song.channels[voice_idx].pitch_macro_cents = 0;
+    m->active_song.channels[voice_idx].relative_pitch_macro_cents = 0;
+    m->active_song.channels[voice_idx].fine_pitch_cents = 0;
     m->active_song.channels[voice_idx].arp_offset = 0;
     m->active_song.channels[voice_idx].sample_in_tick = 0;
     for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
@@ -1620,6 +1662,10 @@ static void sfx_stop_active_macros(xfm_module* m, int voice_idx)
         state.pos = 0;
     }
     sfx.macro_disabled_mask = 0;
+    m->active_song.channels[voice_idx].macro_pan = 3;
+    m->active_song.channels[voice_idx].pitch_macro_cents = 0;
+    m->active_song.channels[voice_idx].relative_pitch_macro_cents = 0;
+    m->active_song.channels[voice_idx].fine_pitch_cents = 0;
     m->active_song.channels[voice_idx].arp_offset = 0;
     m->active_song.channels[voice_idx].sample_in_tick = 0;
 }
@@ -1786,6 +1832,10 @@ static void song_stop_active_macros(xfm_module* m, int ch)
         state.active = false;
         state.released = false;
     }
+    ch_state.macro_pan = 3;
+    ch_state.pitch_macro_cents = 0;
+    ch_state.relative_pitch_macro_cents = 0;
+    ch_state.fine_pitch_cents = 0;
     ch_state.arp_offset = 0;
 }
 
