@@ -82,6 +82,7 @@ struct XfmVoice {
 struct XfmSfxEvent {
     int     note;           // MIDI note, -1 = none, -2 = off, -3 = release, -4 = hard cut
     int     patch_id;       // patch/instrument ID, -1 = inherit
+    int     volume;         // volume 0-127, -1 = inherit
 };
 
 // SFX pattern

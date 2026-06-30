@@ -57,6 +57,8 @@ static void sfx_release_macros(xfm_module* m, int voice_idx);
 static void sfx_stop_active_macros(xfm_module* m, int voice_idx);
 static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames);
 static void song_write_channel_frequency(xfm_module* m, int ch, const XfmSongChannel& ch_state);
+static void song_write_channel_tremolo(xfm_module* m, int ch, int attenuation);
+static void song_load_channel_patch(xfm_module* m, int ch, int patch_id, int volume);
 
 // =============================================================================
 // MODULE LIFETIME
@@ -525,6 +527,7 @@ xfm_sfx_id xfm_sfx_declare(xfm_module* m, xfm_sfx_id id, const char* pattern_tex
         XfmSfxEvent& ev = pat.rows[row];
         ev.note = -1;
         ev.patch_id = -1;
+        ev.volume = -1;
         
         if (!*p || *p == '\0') break;
         
@@ -532,6 +535,7 @@ xfm_sfx_id xfm_sfx_declare(xfm_module* m, xfm_sfx_id id, const char* pattern_tex
         // Format: note(3) + inst(2) + vol(2) [+ effects]
         char note_str[4] = {0};
         char inst_str[3] = {0};
+        char vol_str[3] = {0};
         
         // Copy note (3 chars)
         for (int i = 0; i < 3 && *p && *p != '|' && *p != '\n'; i++) {
@@ -540,6 +544,10 @@ xfm_sfx_id xfm_sfx_declare(xfm_module* m, xfm_sfx_id id, const char* pattern_tex
         // Copy instrument (2 chars)
         for (int i = 0; i < 2 && *p && *p != '|' && *p != '\n'; i++) {
             inst_str[i] = *p++;
+        }
+        // Copy volume (2 chars)
+        for (int i = 0; i < 2 && *p && *p != '|' && *p != '\n'; i++) {
+            vol_str[i] = *p++;
         }
         // Skip rest of channel and move to next line
         while (*p && *p != '\n') p++;
@@ -558,6 +566,12 @@ xfm_sfx_id xfm_sfx_declare(xfm_module* m, xfm_sfx_id id, const char* pattern_tex
             if (ev.patch_id >= 0) last_inst = ev.patch_id;
         } else {
             ev.patch_id = -1;  // inherit
+        }
+
+        if (vol_str[0] && vol_str[0] != '.') {
+            ev.volume = parse_hex2(vol_str);
+        } else {
+            ev.volume = -1;  // inherit
         }
         
         // Resolve instrument inheritance only. A "..." note field is a rest/hold:
@@ -605,6 +619,15 @@ static void sfx_process_row(xfm_module* m, int voice_idx, int row_idx)
     // Update last known patch
     if (ev.patch_id >= 0) {
         sfx->last_patch_id = ev.patch_id;
+    }
+
+    if (ev.volume >= 0) {
+        XfmSongChannel& ch_state = m->active_song.channels[voice_idx];
+        ch_state.current_volume = ev.volume;
+        ch_state.current_volume_f = ev.volume;
+        if (m->channel_active[voice_idx]) {
+            song_write_channel_tremolo(m, voice_idx, 0);
+        }
     }
 
     // Clear auto-off scheduling from previous row
@@ -672,17 +695,13 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
         
         // If gap is 0, key on immediately (fast passage)
         if (sfx.pending_gap == 0) {
-            m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
-            m->current_patch[voice_idx] = sfx.pending_patch_id;
-            m->live_patches[voice_idx] = m->patches[sfx.pending_patch_id];
-            m->live_patch_valid[voice_idx] = true;
-            m->live_patch_id[voice_idx] = sfx.pending_patch_id;
+            XfmSongChannel& ch_state = m->active_song.channels[voice_idx];
+            song_load_channel_patch(m, voice_idx, sfx.pending_patch_id, ch_state.current_volume);
             sfx.live_patch_valid = true;
             sfx_start_patch_macros(m, voice_idx, sfx.pending_patch_id);
             // Re-apply LFO settings after loading patch
             m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
             double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
-            XfmSongChannel& ch_state = m->active_song.channels[voice_idx];
             ch_state.base_note = sfx.pending_note;
             ch_state.current_hz = hz;
             ch_state.target_hz = hz;
@@ -704,17 +723,13 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
         }
 
         // Load patch and key on
-        m->chip->load_patch(m->patches[sfx.pending_patch_id], voice_idx);
-        m->current_patch[voice_idx] = sfx.pending_patch_id;
-        m->live_patches[voice_idx] = m->patches[sfx.pending_patch_id];
-        m->live_patch_valid[voice_idx] = true;
-        m->live_patch_id[voice_idx] = sfx.pending_patch_id;
+        XfmSongChannel& ch_state = m->active_song.channels[voice_idx];
+        song_load_channel_patch(m, voice_idx, sfx.pending_patch_id, ch_state.current_volume);
         sfx.live_patch_valid = true;
         sfx_start_patch_macros(m, voice_idx, sfx.pending_patch_id);
         // Re-apply LFO settings after loading patch
         m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
         double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
-        XfmSongChannel& ch_state = m->active_song.channels[voice_idx];
         ch_state.base_note = sfx.pending_note;
         ch_state.current_hz = hz;
         ch_state.target_hz = hz;
@@ -845,6 +860,8 @@ xfm_voice_id xfm_sfx_play(xfm_module* m, xfm_sfx_id id, int priority)
     m->voices[best_voice].midi_note = -1;
     m->voices[best_voice].patch_id = -1;
     m->channel_active[best_voice] = false;
+    m->active_song.channels[best_voice].current_volume = 127;
+    m->active_song.channels[best_voice].current_volume_f = 127.0;
 
     // Initialize pending gap
     sfx.pending_gap = get_min_gap_samples(m->sample_rate);
