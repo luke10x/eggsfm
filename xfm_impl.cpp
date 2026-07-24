@@ -707,17 +707,21 @@ static int find_next_sfx_note_row(XfmSfxPattern& pat, int start_row)
     return -1;  // No more notes
 }
 
+static XfmActiveSfx* sfx_find_active_for_voice(xfm_module* m, int voice_idx)
+{
+    if (!m || voice_idx < 0 || voice_idx >= 6) return nullptr;
+    for (int slot = 0; slot < 6; slot++) {
+        XfmActiveSfx& sfx = m->active_sfx[slot];
+        if (sfx.active && sfx.voice_idx == voice_idx) return &sfx;
+    }
+    return nullptr;
+}
+
 // Process a row for an SFX voice (sets up pending note)
 // Implements automatic note-off delay for clean transitions
 static void sfx_process_row(xfm_module* m, int voice_idx, int row_idx)
 {
-    XfmActiveSfx* sfx = nullptr;
-    for (int slot = 0; slot < 6; slot++) {
-        if (m->active_sfx[slot].voice_idx == voice_idx) {
-            sfx = &m->active_sfx[slot];
-            break;
-        }
-    }
+    XfmActiveSfx* sfx = sfx_find_active_for_voice(m, voice_idx);
     if (!sfx) return;
 
     XfmSfxPattern& pat = m->sfx_patterns[sfx->sfx_id];
@@ -912,16 +916,17 @@ xfm_voice_id xfm_sfx_play(xfm_module* m, xfm_sfx_id id, int priority)
     
     if (best_voice < 0) return FM_VOICE_INVALID;  // Should not happen
     
-    // Clear the old SFX slot if we're stealing
+    // Key off the voice immediately
+    sfx_stop_active_macros(m, best_voice);
+    m->chip->key_off(best_voice);
+
+    // Clear the old SFX slot if we're stealing. Keep it alive until after
+    // sfx_stop_active_macros(), because SFX macro state is stored per slot.
     if (best_slot >= 0) {
         m->active_sfx[best_slot].active = false;
         m->active_sfx[best_slot].voice_idx = -1;
         m->active_sfx[best_slot].sfx_id = -1;
     }
-    
-    // Key off the voice immediately
-    sfx_stop_active_macros(m, best_voice);
-    m->chip->key_off(best_voice);
     
     // Find a free active_sfx slot
     int slot = -1;
@@ -1744,7 +1749,9 @@ static void song_start_patch_macros(xfm_module* m, int ch, int patch_id)
 static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id)
 {
     if (!m || voice_idx < 0 || voice_idx >= 6 || patch_id < 0 || patch_id > 255) return;
-    XfmActiveSfx& sfx = m->active_sfx[voice_idx];
+    XfmActiveSfx* activeSfx = sfx_find_active_for_voice(m, voice_idx);
+    if (!activeSfx) return;
+    XfmActiveSfx& sfx = *activeSfx;
 
     sfx.macro_disabled_mask = 0;
     m->active_song.channels[voice_idx].macro_pan = 3;
@@ -1778,7 +1785,9 @@ static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id)
 static void sfx_release_macros(xfm_module* m, int voice_idx)
 {
     if (!m || voice_idx < 0 || voice_idx >= 6) return;
-    XfmActiveSfx& sfx = m->active_sfx[voice_idx];
+    XfmActiveSfx* activeSfx = sfx_find_active_for_voice(m, voice_idx);
+    if (!activeSfx) return;
+    XfmActiveSfx& sfx = *activeSfx;
 
     for (int target = 1; target < XFM_MACRO_TARGET_COUNT; target++) {
         XfmMacroState& state = sfx.macro_states[target];
@@ -1798,7 +1807,9 @@ static void sfx_release_macros(xfm_module* m, int voice_idx)
 static void sfx_stop_active_macros(xfm_module* m, int voice_idx)
 {
     if (!m || voice_idx < 0 || voice_idx >= 6) return;
-    XfmActiveSfx& sfx = m->active_sfx[voice_idx];
+    XfmActiveSfx* activeSfx = sfx_find_active_for_voice(m, voice_idx);
+    if (!activeSfx) return;
+    XfmActiveSfx& sfx = *activeSfx;
     for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
         XfmMacroState& state = sfx.macro_states[target];
         state.active = false;
@@ -1818,8 +1829,9 @@ static void sfx_stop_active_macros(xfm_module* m, int voice_idx)
 static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames)
 {
     if (!m || !m->chip || voice_idx < 0 || voice_idx >= 6 || frames <= 0) return;
-    XfmActiveSfx& sfx = m->active_sfx[voice_idx];
-    if (!sfx.active) return;
+    XfmActiveSfx* activeSfx = sfx_find_active_for_voice(m, voice_idx);
+    if (!activeSfx) return;
+    XfmActiveSfx& sfx = *activeSfx;
 
     XfmSfxPattern& pat = m->sfx_patterns[sfx.sfx_id];
     if (pat.tick_rate <= 0) return;
@@ -2049,10 +2061,11 @@ void xfm_patch_refresh_live(xfm_module* m, xfm_patch_id patch_id)
         const bool liveUsesPatch = m->live_patch_valid[ch] && m->live_patch_id[ch] == patch_id;
         const bool songUsesPatch =
             m->active_song.active && m->active_song.channels[ch].current_patch == patch_id;
+        XfmActiveSfx* activeSfx = sfx_find_active_for_voice(m, ch);
         const bool sfxUsesPatch =
-            m->active_sfx[ch].active &&
-            (m->active_sfx[ch].last_patch_id == patch_id ||
-             m->active_sfx[ch].pending_patch_id == patch_id ||
+            activeSfx &&
+            (activeSfx->last_patch_id == patch_id ||
+             activeSfx->pending_patch_id == patch_id ||
              currentUsesPatch);
         const bool activeNow = m->channel_active[ch] || songUsesPatch || sfxUsesPatch;
 
@@ -2071,7 +2084,7 @@ void xfm_patch_refresh_live(xfm_module* m, xfm_patch_id patch_id)
         m->live_patch_valid[ch] = true;
         m->live_patch_id[ch] = patch_id;
         if (songUsesPatch) m->active_song.channels[ch].live_patch_valid = true;
-        if (sfxUsesPatch) m->active_sfx[ch].live_patch_valid = true;
+        if (sfxUsesPatch) activeSfx->live_patch_valid = true;
 
         for (int op = 0; op < 4; op++) {
             song_write_opn_operator(m, ch, op);
