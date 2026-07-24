@@ -80,7 +80,7 @@ struct XfmVoice {
 
 // SFX pattern event (one row)
 struct XfmSfxEvent {
-    int     note;           // MIDI note, -1 = none, -2 = off, -3 = release, -4 = hard cut
+    int     note;           // MIDI note, -1 = none, -2 = OFF/key off, -3 = REL/macro release, -4 = ===/release+key off
     int     patch_id;       // patch/instrument ID, -1 = inherit
     int     volume;         // volume 0-127, -1 = inherit
 };
@@ -231,15 +231,18 @@ typedef struct xfm_patch_opn
 } xfm_patch_opn;
 
 struct XfmSongEvent {
-    int     note;           // MIDI note, -1 = none, -2 = off, -3 = release, -4 = hard cut
+    int     note;           // MIDI note, -1 = none, -2 = OFF/key off, -3 = REL/macro release, -4 = ===/release+key off
     int     patch_id;       // patch/instrument ID, -1 = inherit
     int     volume;         // volume 0-127, -1 = inherit
+    int     arpeggio;       // -1 = no change, 0 = off, 0xxyy = semitone cycle
     int     legato;         // -1 = no change, 0 = off, 1 = on
     int     pitch_slide;    // <= -1000000 = no change, 0 = off, positive = up, negative = down
     int     portamento;     // -1 = no change, 0 = off, >0 = speed
     int     vibrato;        // -1 = no change, 0 = off, 0xxyy = speed/depth
     int     tremolo;        // -1 = no change, 0 = off, 0xxyy = speed/depth
     int     volume_slide;   // <= -1000000 = no change, 0 = off, positive = up, negative = down
+    int     panning;        // -1 = no change, 0..3 = YM2612 LR bitfield
+    int     retrigger;      // -1 = no change, 0 = off, >0 = ticks between note restarts
     int     note_slide;     // <= -1000000 = no change, signed 0xxyy speed/semitones
     int     fine_pitch;     // -1 = no change, 0..255, 0x80 = neutral
     int     hard_reset;     // -1 = no change, 0 = off, 1 = on
@@ -289,10 +292,18 @@ struct XfmSongChannel {
     double          tremolo_phase;
     bool            envelope_hard_reset;
     uint8_t         macro_pan;
+    int             effect_pan;
     int             pitch_macro_cents;
     int             relative_pitch_macro_cents;
     int             base_note;
     int             arp_offset;
+    int             effect_arp_offset;
+    uint8_t         effect_arpeggio_step_a;
+    uint8_t         effect_arpeggio_step_b;
+    uint8_t         effect_arpeggio_phase;
+    bool            effect_arpeggio_active;
+    int             retrigger_ticks;
+    int             retrigger_tick_counter;
     int             sample_in_tick;
     uint64_t        macro_disabled_mask;
     XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
@@ -709,6 +720,82 @@ void xfm_module_reload_patches(xfm_module* m);
  * and invalidate inactive cached voices so their next note reloads the patch.
  */
 void xfm_patch_refresh_live(xfm_module* m, xfm_patch_id patch_id);
+
+typedef enum {
+    XFM_OPN_AUTO_ALG = 0,
+    XFM_OPN_AUTO_FB,
+    XFM_OPN_AUTO_AMS,
+    XFM_OPN_AUTO_FMS,
+
+    XFM_OPN_AUTO_OP1_DT = 10,
+    XFM_OPN_AUTO_OP1_MUL,
+    XFM_OPN_AUTO_OP1_TL,
+    XFM_OPN_AUTO_OP1_RS,
+    XFM_OPN_AUTO_OP1_AR,
+    XFM_OPN_AUTO_OP1_AM,
+    XFM_OPN_AUTO_OP1_DR,
+    XFM_OPN_AUTO_OP1_SR,
+    XFM_OPN_AUTO_OP1_SL,
+    XFM_OPN_AUTO_OP1_RR,
+    XFM_OPN_AUTO_OP1_SSG,
+
+    XFM_OPN_AUTO_OP2_DT = 30,
+    XFM_OPN_AUTO_OP2_MUL,
+    XFM_OPN_AUTO_OP2_TL,
+    XFM_OPN_AUTO_OP2_RS,
+    XFM_OPN_AUTO_OP2_AR,
+    XFM_OPN_AUTO_OP2_AM,
+    XFM_OPN_AUTO_OP2_DR,
+    XFM_OPN_AUTO_OP2_SR,
+    XFM_OPN_AUTO_OP2_SL,
+    XFM_OPN_AUTO_OP2_RR,
+    XFM_OPN_AUTO_OP2_SSG,
+
+    XFM_OPN_AUTO_OP3_DT = 50,
+    XFM_OPN_AUTO_OP3_MUL,
+    XFM_OPN_AUTO_OP3_TL,
+    XFM_OPN_AUTO_OP3_RS,
+    XFM_OPN_AUTO_OP3_AR,
+    XFM_OPN_AUTO_OP3_AM,
+    XFM_OPN_AUTO_OP3_DR,
+    XFM_OPN_AUTO_OP3_SR,
+    XFM_OPN_AUTO_OP3_SL,
+    XFM_OPN_AUTO_OP3_RR,
+    XFM_OPN_AUTO_OP3_SSG,
+
+    XFM_OPN_AUTO_OP4_DT = 70,
+    XFM_OPN_AUTO_OP4_MUL,
+    XFM_OPN_AUTO_OP4_TL,
+    XFM_OPN_AUTO_OP4_RS,
+    XFM_OPN_AUTO_OP4_AR,
+    XFM_OPN_AUTO_OP4_AM,
+    XFM_OPN_AUTO_OP4_DR,
+    XFM_OPN_AUTO_OP4_SR,
+    XFM_OPN_AUTO_OP4_SL,
+    XFM_OPN_AUTO_OP4_RR,
+    XFM_OPN_AUTO_OP4_SSG
+} xfm_opn_auto_param;
+
+typedef struct XfmPatchAutoCfg {
+    xfm_patch_opn* patch;
+    float input;
+    float inputFrom;
+    float inputTo;
+    bool clamp;
+    xfm_opn_auto_param param;
+    int paramFrom;
+    int paramTo;
+} XfmPatchAutoCfg;
+
+/**
+ * Map a world/game value into one OPN patch field.
+ *
+ * This is intentionally small and data-shaped so live patch automation can be
+ * declared near the sound being tuned instead of hand-written as scattered math.
+ *
+ * @return applied, field-clamped parameter value, or -1000000 on invalid config.
+ */
+int apply_xfm_patch_auto(const XfmPatchAutoCfg* cfg);
 
 /**
  * @brief Reset module state for clean export
@@ -1128,6 +1215,11 @@ void xfm_set_auto_off_delay(xfm_module* m, float delay);
 float xfm_get_auto_off_delay(xfm_module* m);
 
 #ifdef __cplusplus
+}
+
+inline int apply_xfm_patch_auto(const XfmPatchAutoCfg& cfg)
+{
+    return apply_xfm_patch_auto(&cfg);
 }
 #endif
 
