@@ -22,6 +22,9 @@
 static constexpr int SONG_PITCH_SLIDE_NONE = -1000000;
 static constexpr int SONG_VOLUME_SLIDE_NONE = -1000000;
 static constexpr int SONG_NOTE_SLIDE_NONE = -1000000;
+// Text tracker notes currently sound one octave low against Furnace/expected pitch.
+// Keep the YM register encoder stable and correct the convention at MIDI->Hz.
+static constexpr int XFM_PLAYBACK_OCTAVE_CORRECTION_SEMITONES = 12;
 static constexpr double XFM_PI = 3.14159265358979323846;
 
 
@@ -589,7 +592,7 @@ static int parse_hex2(const char* p) {
 
 static double note_to_hz(int midi_note)
 {
-    return 440.0 * std::pow(2.0, (midi_note - 69) / 12.0);
+    return 440.0 * std::pow(2.0, (midi_note + XFM_PLAYBACK_OCTAVE_CORRECTION_SEMITONES - 69) / 12.0);
 }
 
 static bool song_is_carrier(uint8_t alg, int op);
@@ -817,7 +820,7 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
             sfx_start_patch_macros(m, voice_idx, sfx.pending_patch_id);
             // Re-apply LFO settings after loading patch
             m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
-            double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
+            double hz = note_to_hz(sfx.pending_note);
             ch_state.base_note = sfx.pending_note;
             ch_state.current_hz = hz;
             ch_state.target_hz = hz;
@@ -845,7 +848,7 @@ static void sfx_commit_keyon(xfm_module* m, int voice_idx, int current_gap)
         sfx_start_patch_macros(m, voice_idx, sfx.pending_patch_id);
         // Re-apply LFO settings after loading patch
         m->chip->enable_lfo(m->lfo_enable, static_cast<uint8_t>(m->lfo_freq));
-        double hz = 440.0 * std::pow(2.0, (sfx.pending_note - 69) / 12.0);
+        double hz = note_to_hz(sfx.pending_note);
         ch_state.base_note = sfx.pending_note;
         ch_state.current_hz = hz;
         ch_state.target_hz = hz;
@@ -3443,7 +3446,7 @@ xfm_voice_id xfm_note_on(xfm_module* m, int midi_note, xfm_patch_id patch_id, in
     }
 
     // Calculate frequency from MIDI note (A4 = 69 = 440 Hz)
-    double hz = 440.0 * std::pow(2.0, (midi_note - 69) / 12.0);
+    double hz = note_to_hz(midi_note);
 
     // Set frequency and key on
     (void)velocity; // Future: use for volume
