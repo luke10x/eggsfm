@@ -118,6 +118,7 @@ struct XfmActiveSfx {
     bool    pending_has_note; // note waiting to be committed
     int     pending_note;   // pending MIDI note
     int     pending_patch_id; // pending patch
+    bool    pending_restart_macros;
     bool    active;         // is currently playing
 
     // Automatic note-off scheduling
@@ -302,8 +303,15 @@ struct XfmSongChannel {
     uint8_t         effect_arpeggio_step_b;
     uint8_t         effect_arpeggio_phase;
     bool            effect_arpeggio_active;
+    // 0Cxx is sticky until 0C00/reset and retriggers remembered notes even after silence;
+    // do not copy Furnace's historical finished-sample retrigger bug.
     int             retrigger_ticks;
     int             retrigger_tick_counter;
+    int             retrigger_next_sample;
+    bool            envelope_rekey_pending;
+    int             envelope_rekey_sample;
+    bool            envelope_rekey_hard;
+    bool            envelope_rekey_restart_macros;
     int             sample_in_tick;
     uint64_t        macro_disabled_mask;
     XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
@@ -455,7 +463,7 @@ public:
     void key_off(int ch) {
         write(0, 0x28, ((ch >= 3) ? 0x04 : 0x00) | (ch % 3));
     }
-    
+
     // Hard mute - instantly silence channel by maxing out TL on all operators
     // This is more aggressive than key_off which still plays release envelope
     void hard_mute(int ch) {
