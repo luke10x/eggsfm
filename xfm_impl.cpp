@@ -57,8 +57,11 @@ static inline int get_dynamic_gap(int sample_rate, int rows_until_next, int samp
 
 static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id);
 static void sfx_release_macros(xfm_module* m, int voice_idx);
+static void sfx_release_macros_then_key_off(xfm_module* m, int voice_idx);
 static void sfx_stop_active_macros(xfm_module* m, int voice_idx);
 static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames);
+static bool song_has_active_released_macros(xfm_module* m, int ch);
+static void song_release_macros_then_key_off(xfm_module* m, int ch);
 static void song_write_channel_frequency(xfm_module* m, int ch, const XfmSongChannel& ch_state);
 static void song_write_channel_tremolo(xfm_module* m, int ch, int attenuation);
 static void song_load_channel_patch(xfm_module* m, int ch, int patch_id, int volume);
@@ -145,6 +148,7 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
         m->active_sfx[i].pending_gap = get_min_gap_samples(m->sample_rate);
         m->active_sfx[i].auto_off_scheduled = false;
         m->active_sfx[i].auto_off_at_sample = 0;
+        m->active_sfx[i].release_keyoff_pending = false;
         m->active_sfx[i].legato_enabled = false;
         m->active_sfx[i].portamento_active = false;
         m->active_sfx[i].portamento_target_note = -1;
@@ -214,6 +218,7 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
         m->active_song.channels[ch].envelope_rekey_sample = -1;
         m->active_song.channels[ch].envelope_rekey_hard = false;
         m->active_song.channels[ch].envelope_rekey_restart_macros = false;
+        m->active_song.channels[ch].release_keyoff_pending = false;
         m->active_song.channels[ch].sample_in_tick = 0;
         m->active_song.channels[ch].macro_disabled_mask = 0;
         for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
@@ -303,6 +308,7 @@ void xfm_module_reset_state(xfm_module* m)
         m->active_sfx[i].rows_remaining = 0;
         m->active_sfx[i].pending_has_note = false;
         m->active_sfx[i].pending_note = -1;
+        m->active_sfx[i].release_keyoff_pending = false;
         m->active_sfx[i].pending_patch_id = -1;
         m->active_sfx[i].pending_restart_macros = true;
         m->active_sfx[i].auto_off_scheduled = false;
@@ -342,6 +348,7 @@ void xfm_module_reset_state(xfm_module* m)
         m->active_song.channels[ch].envelope_rekey_sample = -1;
         m->active_song.channels[ch].envelope_rekey_hard = false;
         m->active_song.channels[ch].envelope_rekey_restart_macros = false;
+        m->active_song.channels[ch].release_keyoff_pending = false;
         m->active_song.channels[ch].sample_in_tick = 0;
         m->active_song.channels[ch].macro_disabled_mask = 0;
         for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
@@ -772,10 +779,8 @@ static void sfx_process_row(xfm_module* m, int voice_idx, int row_idx)
         // REL releases macros only; FM key state is left untouched.
         sfx_release_macros(m, voice_idx);
     } else if (ev.note == -4) {
-        // === is Furnace-style note release: macro release plus FM key off.
-        sfx_release_macros(m, voice_idx);
-        m->chip->key_off(voice_idx);
-        m->channel_active[voice_idx] = false;
+        // === plays macro release tails first, then keys off the FM envelope.
+        sfx_release_macros_then_key_off(m, voice_idx);
     } else if (ev.note >= 0) {
         // New note - check if voice is still playing from previous row
         bool was_playing = m->channel_active[voice_idx];
@@ -984,6 +989,7 @@ xfm_voice_id xfm_sfx_play(xfm_module* m, xfm_sfx_id id, int priority)
     sfx.target_hz = 0.0;
     sfx.portamento_step_hz = 0.0;
     sfx.live_patch_valid = false;
+    sfx.release_keyoff_pending = false;
     sfx.macro_disabled_mask = 0;
     for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
         sfx.macro_states[target].macro_id = -1;
@@ -1056,12 +1062,14 @@ void xfm_sfx_stop(xfm_module* m, xfm_voice_id voice)
         sfx.pending_gap = get_min_gap_samples(m->sample_rate);
         sfx.auto_off_scheduled = false;
         sfx.auto_off_at_sample = 0;
+        sfx.release_keyoff_pending = false;
         sfx.portamento_active = false;
         sfx.portamento_target_note = -1;
         sfx.current_hz = 0.0;
         sfx.target_hz = 0.0;
         sfx.portamento_step_hz = 0.0;
         sfx.live_patch_valid = false;
+        sfx.release_keyoff_pending = false;
         sfx.macro_disabled_mask = 0;
         for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
             sfx.macro_states[target].macro_id = -1;
@@ -1070,6 +1078,20 @@ void xfm_sfx_stop(xfm_module* m, xfm_voice_id voice)
             sfx.macro_states[target].released = false;
         }
     }
+}
+
+void xfm_sfx_release_macros(xfm_module* m, xfm_voice_id voice)
+{
+    if (!m) return;
+    if (voice < 0 || voice >= 6) return;
+    sfx_release_macros(m, voice);
+}
+
+void xfm_sfx_release_macros_then_key_off(xfm_module* m, xfm_voice_id voice)
+{
+    if (!m) return;
+    if (voice < 0 || voice >= 6) return;
+    sfx_release_macros_then_key_off(m, voice);
 }
 
 void xfm_sfx_stop_all(xfm_module* m)
@@ -1098,7 +1120,7 @@ static void update_sfx_voice(xfm_module* m, int slot)
 
     // Check for scheduled auto key-off
     if (sfx.auto_off_scheduled && sfx.sample_in_row == sfx.auto_off_at_sample) {
-        sfx_release_macros(m, voice);
+        sfx_stop_active_macros(m, voice);
         m->chip->key_off(voice);
         m->channel_active[voice] = false;
         sfx.auto_off_scheduled = false;
@@ -1186,6 +1208,7 @@ static void finish_sfx_voice(xfm_module* m, int slot)
     sfx.active = false;
     sfx.voice_idx = -1;
     sfx.sfx_id = -1;
+    sfx.release_keyoff_pending = false;
 }
 
 static bool process_sfx_events_now(xfm_module* m)
@@ -1200,6 +1223,7 @@ static bool process_sfx_events_now(xfm_module* m)
         int voice = sfx.voice_idx;
 
         if (sfx.auto_off_scheduled && sfx.sample_in_row >= sfx.auto_off_at_sample) {
+            sfx_stop_active_macros(m, voice);
             m->chip->key_off(voice);
             m->channel_active[voice] = false;
             sfx.auto_off_scheduled = false;
@@ -1872,6 +1896,7 @@ static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id)
     XfmActiveSfx& sfx = *activeSfx;
 
     sfx.macro_disabled_mask = 0;
+    sfx.release_keyoff_pending = false;
     m->active_song.channels[voice_idx].macro_pan = 3;
     m->active_song.channels[voice_idx].pitch_macro_cents = 0;
     m->active_song.channels[voice_idx].relative_pitch_macro_cents = 0;
@@ -1922,6 +1947,38 @@ static void sfx_release_macros(xfm_module* m, int voice_idx)
     }
 }
 
+static bool sfx_has_active_released_macros(xfm_module* m, int voice_idx)
+{
+    if (!m || voice_idx < 0 || voice_idx >= 6) return false;
+    XfmActiveSfx* activeSfx = sfx_find_active_for_voice(m, voice_idx);
+    if (!activeSfx) return false;
+    for (int target = 1; target < XFM_MACRO_TARGET_COUNT; target++) {
+        const XfmMacroState& state = activeSfx->macro_states[target];
+        if (state.active && state.released) return true;
+    }
+    return false;
+}
+
+static void sfx_release_macros_then_key_off(xfm_module* m, int voice_idx)
+{
+    if (!m || !m->chip || voice_idx < 0 || voice_idx >= 6) return;
+    XfmActiveSfx* activeSfx = sfx_find_active_for_voice(m, voice_idx);
+    if (!activeSfx) return;
+
+    sfx_release_macros(m, voice_idx);
+    // Regression guard: do not key_off immediately when a release tail exists.
+    // Preview-key release and === must let macro REL values play first; otherwise
+    // they collapse into OFF and the user never hears the release section.
+    if (sfx_has_active_released_macros(m, voice_idx)) {
+        activeSfx->release_keyoff_pending = true;
+        return;
+    }
+
+    m->chip->key_off(voice_idx);
+    m->channel_active[voice_idx] = false;
+    activeSfx->release_keyoff_pending = false;
+}
+
 static void sfx_stop_active_macros(xfm_module* m, int voice_idx)
 {
     if (!m || voice_idx < 0 || voice_idx >= 6) return;
@@ -1935,6 +1992,7 @@ static void sfx_stop_active_macros(xfm_module* m, int voice_idx)
         state.macro_id = -1;
         state.pos = 0;
     }
+    sfx.release_keyoff_pending = false;
     sfx.macro_disabled_mask = 0;
     m->active_song.channels[voice_idx].macro_pan = 3;
     m->active_song.channels[voice_idx].pitch_macro_cents = 0;
@@ -1987,6 +2045,12 @@ static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames)
             state.pos = static_cast<uint8_t>(next_pos);
             song_apply_macro_value(m, voice_idx, target, macro.values[state.pos]);
         }
+    }
+
+    if (sfx.release_keyoff_pending && !sfx_has_active_released_macros(m, voice_idx)) {
+        m->chip->key_off(voice_idx);
+        m->channel_active[voice_idx] = false;
+        sfx.release_keyoff_pending = false;
     }
 }
 
@@ -2092,6 +2156,12 @@ static void song_advance_macros(xfm_module* m, int frames)
                 }
             }
         }
+
+        if (ch_state.release_keyoff_pending && !song_has_active_released_macros(m, ch)) {
+            if (m->channel_active[ch]) m->chip->key_off(ch);
+            m->channel_active[ch] = false;
+            ch_state.release_keyoff_pending = false;
+        }
     }
 }
 
@@ -2115,6 +2185,35 @@ static void song_release_macros(xfm_module* m, int ch)
     }
 }
 
+static bool song_has_active_released_macros(xfm_module* m, int ch)
+{
+    if (!m || ch < 0 || ch >= 6) return false;
+    XfmSongChannel& ch_state = m->active_song.channels[ch];
+    for (int target = 1; target < XFM_MACRO_TARGET_COUNT; target++) {
+        const XfmMacroState& state = ch_state.macro_states[target];
+        if (state.active && state.released) return true;
+    }
+    return false;
+}
+
+static void song_release_macros_then_key_off(xfm_module* m, int ch)
+{
+    if (!m || !m->chip || ch < 0 || ch >= 6) return;
+    XfmSongChannel& ch_state = m->active_song.channels[ch];
+
+    song_release_macros(m, ch);
+    // Keep song === aligned with SFX preview release: macro REL first, key_off
+    // only after the released macro states finish.
+    if (song_has_active_released_macros(m, ch)) {
+        ch_state.release_keyoff_pending = true;
+        return;
+    }
+
+    if (m->channel_active[ch]) m->chip->key_off(ch);
+    m->channel_active[ch] = false;
+    ch_state.release_keyoff_pending = false;
+}
+
 static void song_stop_active_macros(xfm_module* m, int ch)
 {
     if (!m || ch < 0 || ch >= 6) return;
@@ -2125,6 +2224,7 @@ static void song_stop_active_macros(xfm_module* m, int ch)
         state.active = false;
         state.released = false;
     }
+    ch_state.release_keyoff_pending = false;
     ch_state.macro_pan = 3;
     ch_state.pitch_macro_cents = 0;
     ch_state.relative_pitch_macro_cents = 0;
@@ -2509,6 +2609,7 @@ static void song_key_on_channel(xfm_module* m, int ch, XfmSongChannel& ch_state)
     if (!m->patch_present[ch_state.pending_patch]) return;
 
     song_clear_envelope_rekey(ch_state);
+    ch_state.release_keyoff_pending = false;
     song_load_channel_patch(m, ch, ch_state.pending_patch, ch_state.current_volume);
     ch_state.base_note = ch_state.pending_note;
     song_start_patch_macros(m, ch, ch_state.pending_patch);
@@ -2739,14 +2840,17 @@ static void song_process_row(xfm_module* m, int row_idx)
 
         if (ev.note == -2 || ev.note == -3 || ev.note == -4) {
             song_clear_envelope_rekey(ch_state);
-            // Furnace semantics: OFF = key off, REL = macro release, === = both.
+            // OFF is immediate key-off, REL is macro release only, and ===
+            // plays macro release tails before key-off.
             if (ev.note == -3) {
                 song_release_macros(m, ch);
             } else {
-                if (ev.note == -4) song_release_macros(m, ch);
-                else song_stop_active_macros(m, ch);
-                if (m->channel_active[ch]) m->chip->key_off(ch);
-                m->channel_active[ch] = false;
+                if (ev.note == -4) song_release_macros_then_key_off(m, ch);
+                else {
+                    song_stop_active_macros(m, ch);
+                    if (m->channel_active[ch]) m->chip->key_off(ch);
+                    m->channel_active[ch] = false;
+                }
             }
             ch_state.pending_has_note = false;
             ch_state.pending_is_off = false;

@@ -80,7 +80,7 @@ struct XfmVoice {
 
 // SFX pattern event (one row)
 struct XfmSfxEvent {
-    int     note;           // MIDI note, -1 = none, -2 = OFF/key off, -3 = REL/macro release, -4 = ===/release+key off
+    int     note;           // MIDI note, -1 = none, -2 = OFF/key off, -3 = REL/macro release, -4 = ===/macro release + FM key off
     int     patch_id;       // patch/instrument ID, -1 = inherit
     int     volume;         // volume 0-127, -1 = inherit
 };
@@ -135,6 +135,7 @@ struct XfmActiveSfx {
     double  target_hz;
     double  portamento_step_hz;
     bool    live_patch_valid;
+    bool    release_keyoff_pending;
     uint64_t        macro_disabled_mask;
     XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
 };
@@ -232,7 +233,7 @@ typedef struct xfm_patch_opn
 } xfm_patch_opn;
 
 struct XfmSongEvent {
-    int     note;           // MIDI note, -1 = none, -2 = OFF/key off, -3 = REL/macro release, -4 = ===/release+key off
+    int     note;           // MIDI note, -1 = none, -2 = OFF/key off, -3 = REL/macro release, -4 = ===/macro release + FM key off
     int     patch_id;       // patch/instrument ID, -1 = inherit
     int     volume;         // volume 0-127, -1 = inherit
     int     arpeggio;       // -1 = no change, 0 = off, 0xxyy = semitone cycle
@@ -312,6 +313,7 @@ struct XfmSongChannel {
     int             envelope_rekey_sample;
     bool            envelope_rekey_hard;
     bool            envelope_rekey_restart_macros;
+    bool            release_keyoff_pending;
     int             sample_in_tick;
     uint64_t        macro_disabled_mask;
     XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
@@ -1029,6 +1031,19 @@ xfm_voice_id xfm_sfx_play(
  * continue advancing rows after being stopped.
  */
 void xfm_sfx_stop(xfm_module* m, xfm_voice_id voice);
+
+/**
+ * Release macros on a playing SFX voice without stopping the underlying note.
+ *
+ * This matches a REL event in an SFX pattern: active macros jump to their
+ * release_start and the sequencer keeps running so release values can be heard.
+ */
+void xfm_sfx_release_macros(xfm_module* m, xfm_voice_id voice);
+
+/**
+ * Release macros and key off the SFX voice after release macro tails finish.
+ */
+void xfm_sfx_release_macros_then_key_off(xfm_module* m, xfm_voice_id voice);
 
 /**
  * Stop all active SFX voices.
