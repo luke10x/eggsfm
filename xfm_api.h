@@ -136,6 +136,7 @@ struct XfmActiveSfx {
     double  portamento_step_hz;
     bool    live_patch_valid;
     bool    release_keyoff_pending;
+    bool    release_stop_pending;
     uint64_t        macro_disabled_mask;
     XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
 };
@@ -1044,6 +1045,15 @@ void xfm_sfx_release_macros(xfm_module* m, xfm_voice_id voice);
  * Release macros and key off the SFX voice after release macro tails finish.
  */
 void xfm_sfx_release_macros_then_key_off(xfm_module* m, xfm_voice_id voice);
+
+/**
+ * Release macros, key off after release tails finish, then retire the SFX voice.
+ *
+ * Use this for externally-held preview voices. Pattern-authored === rows should
+ * keep using xfm_sfx_release_macros_then_key_off so the SFX sequencer can
+ * continue after the release event if it has later rows.
+ */
+void xfm_sfx_release_macros_then_stop(xfm_module* m, xfm_voice_id voice);
 
 /**
  * Stop all active SFX voices.

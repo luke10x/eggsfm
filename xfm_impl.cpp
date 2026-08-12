@@ -58,6 +58,7 @@ static inline int get_dynamic_gap(int sample_rate, int rows_until_next, int samp
 static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id);
 static void sfx_release_macros(xfm_module* m, int voice_idx);
 static void sfx_release_macros_then_key_off(xfm_module* m, int voice_idx);
+static void sfx_release_macros_then_stop(xfm_module* m, int voice_idx);
 static void sfx_stop_active_macros(xfm_module* m, int voice_idx);
 static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames);
 static bool song_has_active_released_macros(xfm_module* m, int ch);
@@ -149,6 +150,7 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
         m->active_sfx[i].auto_off_scheduled = false;
         m->active_sfx[i].auto_off_at_sample = 0;
         m->active_sfx[i].release_keyoff_pending = false;
+        m->active_sfx[i].release_stop_pending = false;
         m->active_sfx[i].legato_enabled = false;
         m->active_sfx[i].portamento_active = false;
         m->active_sfx[i].portamento_target_note = -1;
@@ -309,6 +311,7 @@ void xfm_module_reset_state(xfm_module* m)
         m->active_sfx[i].pending_has_note = false;
         m->active_sfx[i].pending_note = -1;
         m->active_sfx[i].release_keyoff_pending = false;
+        m->active_sfx[i].release_stop_pending = false;
         m->active_sfx[i].pending_patch_id = -1;
         m->active_sfx[i].pending_restart_macros = true;
         m->active_sfx[i].auto_off_scheduled = false;
@@ -739,6 +742,16 @@ static XfmActiveSfx* sfx_find_active_for_voice(xfm_module* m, int voice_idx)
     return nullptr;
 }
 
+static int sfx_find_active_slot_for_voice(xfm_module* m, int voice_idx)
+{
+    if (!m || voice_idx < 0 || voice_idx >= 6) return -1;
+    for (int slot = 0; slot < 6; slot++) {
+        XfmActiveSfx& sfx = m->active_sfx[slot];
+        if (sfx.active && sfx.voice_idx == voice_idx) return slot;
+    }
+    return -1;
+}
+
 // Process a row for an SFX voice (sets up pending note)
 // Implements automatic note-off delay for clean transitions
 static void sfx_process_row(xfm_module* m, int voice_idx, int row_idx)
@@ -990,6 +1003,7 @@ xfm_voice_id xfm_sfx_play(xfm_module* m, xfm_sfx_id id, int priority)
     sfx.portamento_step_hz = 0.0;
     sfx.live_patch_valid = false;
     sfx.release_keyoff_pending = false;
+    sfx.release_stop_pending = false;
     sfx.macro_disabled_mask = 0;
     for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
         sfx.macro_states[target].macro_id = -1;
@@ -1063,6 +1077,7 @@ void xfm_sfx_stop(xfm_module* m, xfm_voice_id voice)
         sfx.auto_off_scheduled = false;
         sfx.auto_off_at_sample = 0;
         sfx.release_keyoff_pending = false;
+        sfx.release_stop_pending = false;
         sfx.portamento_active = false;
         sfx.portamento_target_note = -1;
         sfx.current_hz = 0.0;
@@ -1070,6 +1085,7 @@ void xfm_sfx_stop(xfm_module* m, xfm_voice_id voice)
         sfx.portamento_step_hz = 0.0;
         sfx.live_patch_valid = false;
         sfx.release_keyoff_pending = false;
+        sfx.release_stop_pending = false;
         sfx.macro_disabled_mask = 0;
         for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
             sfx.macro_states[target].macro_id = -1;
@@ -1092,6 +1108,13 @@ void xfm_sfx_release_macros_then_key_off(xfm_module* m, xfm_voice_id voice)
     if (!m) return;
     if (voice < 0 || voice >= 6) return;
     sfx_release_macros_then_key_off(m, voice);
+}
+
+void xfm_sfx_release_macros_then_stop(xfm_module* m, xfm_voice_id voice)
+{
+    if (!m) return;
+    if (voice < 0 || voice >= 6) return;
+    sfx_release_macros_then_stop(m, voice);
 }
 
 void xfm_sfx_stop_all(xfm_module* m)
@@ -1209,6 +1232,7 @@ static void finish_sfx_voice(xfm_module* m, int slot)
     sfx.voice_idx = -1;
     sfx.sfx_id = -1;
     sfx.release_keyoff_pending = false;
+    sfx.release_stop_pending = false;
 }
 
 static bool process_sfx_events_now(xfm_module* m)
@@ -1897,6 +1921,7 @@ static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id)
 
     sfx.macro_disabled_mask = 0;
     sfx.release_keyoff_pending = false;
+    sfx.release_stop_pending = false;
     m->active_song.channels[voice_idx].macro_pan = 3;
     m->active_song.channels[voice_idx].pitch_macro_cents = 0;
     m->active_song.channels[voice_idx].relative_pitch_macro_cents = 0;
@@ -1977,6 +2002,24 @@ static void sfx_release_macros_then_key_off(xfm_module* m, int voice_idx)
     m->chip->key_off(voice_idx);
     m->channel_active[voice_idx] = false;
     activeSfx->release_keyoff_pending = false;
+    activeSfx->release_stop_pending = false;
+}
+
+static void sfx_release_macros_then_stop(xfm_module* m, int voice_idx)
+{
+    if (!m || !m->chip || voice_idx < 0 || voice_idx >= 6) return;
+    XfmActiveSfx* activeSfx = sfx_find_active_for_voice(m, voice_idx);
+    if (!activeSfx) return;
+
+    sfx_release_macros(m, voice_idx);
+    if (sfx_has_active_released_macros(m, voice_idx)) {
+        activeSfx->release_keyoff_pending = true;
+        activeSfx->release_stop_pending = true;
+        return;
+    }
+
+    int slot = sfx_find_active_slot_for_voice(m, voice_idx);
+    if (slot >= 0) finish_sfx_voice(m, slot);
 }
 
 static void sfx_stop_active_macros(xfm_module* m, int voice_idx)
@@ -1993,6 +2036,7 @@ static void sfx_stop_active_macros(xfm_module* m, int voice_idx)
         state.pos = 0;
     }
     sfx.release_keyoff_pending = false;
+    sfx.release_stop_pending = false;
     sfx.macro_disabled_mask = 0;
     m->active_song.channels[voice_idx].macro_pan = 3;
     m->active_song.channels[voice_idx].pitch_macro_cents = 0;
@@ -2048,9 +2092,14 @@ static void sfx_advance_macros(xfm_module* m, int voice_idx, int frames)
     }
 
     if (sfx.release_keyoff_pending && !sfx_has_active_released_macros(m, voice_idx)) {
-        m->chip->key_off(voice_idx);
-        m->channel_active[voice_idx] = false;
-        sfx.release_keyoff_pending = false;
+        if (sfx.release_stop_pending) {
+            int slot = sfx_find_active_slot_for_voice(m, voice_idx);
+            if (slot >= 0) finish_sfx_voice(m, slot);
+        } else {
+            m->chip->key_off(voice_idx);
+            m->channel_active[voice_idx] = false;
+            sfx.release_keyoff_pending = false;
+        }
     }
 }
 
