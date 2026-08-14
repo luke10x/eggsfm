@@ -233,6 +233,12 @@ typedef struct xfm_patch_opn
     xfm_patch_opn_operator op[4]; /* 4 operators */
 } xfm_patch_opn;
 
+typedef enum xfm_tuning_mode
+{
+    XFM_TUNING_12_TET = 0,
+    XFM_TUNING_JUST_INTONATION = 1,
+} xfm_tuning_mode;
+
 struct XfmSongEvent {
     int     note;           // MIDI note, -1 = none, -2 = OFF/key off, -3 = REL/macro release, -4 = ===/macro release + FM key off
     int     patch_id;       // patch/instrument ID, -1 = inherit
@@ -596,6 +602,10 @@ struct xfm_module {
     bool            lfo_enable;
     int             lfo_freq;
 
+    // Song tuning state. SFX modules should stay at the default 12-TET.
+    xfm_tuning_mode tuning_mode;
+    int             tuning_root;
+
     // Automatic note off delay (0.0 = immediate, 1.0 = full row)
     float           auto_off_delay;  // Default 0.3 (30% of row)
 
@@ -719,6 +729,7 @@ void xfm_module_set_volume(xfm_module* m, float volume);
  * Interpretation of freq depends on chip type.
  */
 void xfm_module_set_lfo(xfm_module* m, bool enable, int freq);
+void xfm_module_set_tuning(xfm_module* m, xfm_tuning_mode mode, int root);
 
 /**
  * Reload all patches and reset voice patch tracking.

@@ -91,6 +91,8 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
     m->chip          = new (std::nothrow) XfmChipOpn;
     m->lfo_enable    = false;
     m->lfo_freq      = 0;
+    m->tuning_mode   = XFM_TUNING_12_TET;
+    m->tuning_root   = 0;
     m->voice_age_counter = 0;
     m->auto_off_delay = 0.3f;  // Default: 30% of row before key-off
 
@@ -265,6 +267,19 @@ void xfm_module_set_lfo(xfm_module* m, bool enable, int freq)
     m->lfo_enable = enable;
     m->lfo_freq = freq & 7;
     m->chip->enable_lfo(enable, static_cast<uint8_t>(m->lfo_freq));
+}
+
+void xfm_module_set_tuning(xfm_module* m, xfm_tuning_mode mode, int root)
+{
+    if (!m) return;
+    m->tuning_mode = mode == XFM_TUNING_JUST_INTONATION ? XFM_TUNING_JUST_INTONATION : XFM_TUNING_12_TET;
+    m->tuning_root = ((root % 12) + 12) % 12;
+    if (!m->chip || !m->active_song.active)
+        return;
+    for (int ch = 0; ch < 6; ch++) {
+        if (m->channel_active[ch] && m->active_song.channels[ch].base_note >= 0)
+            song_write_channel_frequency(m, ch, m->active_song.channels[ch]);
+    }
 }
 
 void xfm_module_reload_patches(xfm_module* m)
@@ -615,6 +630,35 @@ static int parse_hex2(const char* p) {
 static double note_to_hz(int midi_note)
 {
     return 440.0 * std::pow(2.0, (midi_note + XFM_PLAYBACK_OCTAVE_CORRECTION_SEMITONES - 69) / 12.0);
+}
+
+static double note_to_hz_for_tuning(const xfm_module* m, int midi_note)
+{
+    if (!m || m->tuning_mode != XFM_TUNING_JUST_INTONATION)
+        return note_to_hz(midi_note);
+
+    static constexpr double ratios[12] = {
+        1.0,
+        16.0 / 15.0,
+        9.0 / 8.0,
+        6.0 / 5.0,
+        5.0 / 4.0,
+        4.0 / 3.0,
+        45.0 / 32.0,
+        3.0 / 2.0,
+        8.0 / 5.0,
+        5.0 / 3.0,
+        9.0 / 5.0,
+        15.0 / 8.0,
+    };
+
+    const int corrected = midi_note + XFM_PLAYBACK_OCTAVE_CORRECTION_SEMITONES;
+    const int root = ((m->tuning_root % 12) + 12) % 12;
+    const int pitchClass = ((corrected % 12) + 12) % 12;
+    const int offset = ((pitchClass - root) % 12 + 12) % 12;
+    const int tonicMidi = corrected - offset;
+    const double tonicHz = 440.0 * std::pow(2.0, (tonicMidi - 69) / 12.0);
+    return tonicHz * ratios[offset];
 }
 
 static bool song_is_carrier(uint8_t alg, int op);
@@ -2625,12 +2669,16 @@ static void song_apply_opn_effect(xfm_module* m, int ch, const XfmSongOpnEffect&
     }
 }
 
-static double song_channel_effective_hz(const XfmSongChannel& ch_state)
+static double song_channel_effective_hz(const xfm_module* m, const XfmSongChannel& ch_state)
 {
     double hz = ch_state.current_hz;
     if (hz <= 0.0) return hz;
 
     int total_arp_offset = ch_state.arp_offset + ch_state.effect_arp_offset;
+    if (m && m->tuning_mode == XFM_TUNING_JUST_INTONATION && ch_state.base_note >= 0) {
+        hz = note_to_hz_for_tuning(m, ch_state.base_note + total_arp_offset);
+        total_arp_offset = 0;
+    }
     if (total_arp_offset != 0) {
         hz *= std::pow(2.0, total_arp_offset / 12.0);
     }
@@ -2644,9 +2692,14 @@ static double song_channel_effective_hz(const XfmSongChannel& ch_state)
     return hz;
 }
 
+static double song_channel_effective_hz(const XfmSongChannel& ch_state)
+{
+    return song_channel_effective_hz(nullptr, ch_state);
+}
+
 static void song_write_channel_frequency(xfm_module* m, int ch, const XfmSongChannel& ch_state)
 {
-    double hz = song_channel_effective_hz(ch_state);
+    double hz = song_channel_effective_hz(m, ch_state);
     if (hz > 0.0) {
         m->chip->set_frequency(ch, hz, 0);
     }
@@ -2662,7 +2715,7 @@ static void song_key_on_channel(xfm_module* m, int ch, XfmSongChannel& ch_state)
     song_load_channel_patch(m, ch, ch_state.pending_patch, ch_state.current_volume);
     ch_state.base_note = ch_state.pending_note;
     song_start_patch_macros(m, ch, ch_state.pending_patch);
-    double hz = note_to_hz(ch_state.base_note);
+    double hz = note_to_hz_for_tuning(m, ch_state.base_note);
     ch_state.current_hz = hz;
     ch_state.target_hz = hz;
     ch_state.portamento_active = false;
@@ -2685,7 +2738,7 @@ static void song_key_on_channel(xfm_module* m, int ch, XfmSongChannel& ch_state)
 static void song_start_portamento(xfm_module* m, XfmSongPattern& pat, int ch,
                                   XfmSongChannel& ch_state, int target_note)
 {
-    double target_hz = note_to_hz(target_note);
+    double target_hz = note_to_hz_for_tuning(m, target_note);
     if (!m->channel_active[ch] || ch_state.current_hz <= 0.0 || ch_state.portamento_speed <= 0) {
         ch_state.pending_has_note = true;
         ch_state.pending_note = target_note;
@@ -2741,7 +2794,7 @@ static bool song_apply_legato_note(xfm_module* m, int ch, XfmSongChannel& ch_sta
         song_load_channel_patch(m, ch, ch_state.current_patch, ch_state.current_volume);
     }
 
-    double hz = note_to_hz(note);
+    double hz = note_to_hz_for_tuning(m, note);
     ch_state.base_note = note;
     ch_state.current_hz = hz;
     ch_state.target_hz = hz;
@@ -3770,7 +3823,7 @@ xfm_voice_id xfm_note_on(xfm_module* m, int midi_note, xfm_patch_id patch_id, in
     }
 
     // Calculate frequency from MIDI note (A4 = 69 = 440 Hz)
-    double hz = note_to_hz(midi_note);
+    double hz = note_to_hz_for_tuning(m, midi_note);
 
     // Set frequency and key on
     (void)velocity; // Future: use for volume
