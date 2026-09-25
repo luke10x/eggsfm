@@ -55,6 +55,13 @@ static inline int get_dynamic_gap(int sample_rate, int rows_until_next, int samp
     return std::min(max_gap, dynamic_gap);
 }
 
+static inline int song_tick_to_row_sample(const XfmSongPattern& pat, int tick)
+{
+    tick = std::max(0, tick);
+    int samples_per_tick = std::max(1, pat.samples_per_row / std::max(1, pat.speed));
+    return std::min(std::max(0, pat.samples_per_row - 1), tick * samples_per_tick);
+}
+
 static void sfx_start_patch_macros(xfm_module* m, int voice_idx, int patch_id);
 static void sfx_release_macros(xfm_module* m, int voice_idx);
 static void sfx_release_macros_then_key_off(xfm_module* m, int voice_idx);
@@ -223,6 +230,9 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
         m->active_song.channels[ch].envelope_rekey_hard = false;
         m->active_song.channels[ch].envelope_rekey_restart_macros = false;
         m->active_song.channels[ch].release_keyoff_pending = false;
+        m->active_song.channels[ch].note_cut_sample = -1;
+        m->active_song.channels[ch].note_delay_sample = -1;
+        m->active_song.channels[ch].note_release_sample = -1;
         m->active_song.channels[ch].sample_in_tick = 0;
         m->active_song.channels[ch].macro_disabled_mask = 0;
         for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
@@ -367,6 +377,9 @@ void xfm_module_reset_state(xfm_module* m)
         m->active_song.channels[ch].envelope_rekey_hard = false;
         m->active_song.channels[ch].envelope_rekey_restart_macros = false;
         m->active_song.channels[ch].release_keyoff_pending = false;
+        m->active_song.channels[ch].note_cut_sample = -1;
+        m->active_song.channels[ch].note_delay_sample = -1;
+        m->active_song.channels[ch].note_release_sample = -1;
         m->active_song.channels[ch].sample_in_tick = 0;
         m->active_song.channels[ch].macro_disabled_mask = 0;
         for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
@@ -1431,6 +1444,9 @@ xfm_song_id xfm_song_declare(xfm_module* m, xfm_song_id id, const char* pattern_
             song.rows[r][ch].retrigger = -1;
             song.rows[r][ch].note_slide = SONG_NOTE_SLIDE_NONE;
             song.rows[r][ch].fine_pitch = -1;
+            song.rows[r][ch].note_cut = -1;
+            song.rows[r][ch].note_delay = -1;
+            song.rows[r][ch].note_release = -1;
             song.rows[r][ch].hard_reset = -1;
             song.rows[r][ch].macro_enable = -1;
             song.rows[r][ch].macro_disable = -1;
@@ -1462,6 +1478,9 @@ xfm_song_id xfm_song_declare(xfm_module* m, xfm_song_id id, const char* pattern_
             ev.retrigger = -1;  // -1 = no change
             ev.note_slide = SONG_NOTE_SLIDE_NONE;     // no change
             ev.fine_pitch = -1;  // -1 = no change
+            ev.note_cut = -1;    // -1 = none
+            ev.note_delay = -1;  // -1 = none
+            ev.note_release = -1;// -1 = none
             ev.hard_reset = -1;   // -1 = no change
             ev.macro_enable = -1;  // -1 = no change
             ev.macro_disable = -1; // -1 = no change
@@ -1532,6 +1551,12 @@ xfm_song_id xfm_song_declare(xfm_module* m, xfm_song_id id, const char* pattern_
                         ev.fine_pitch = value;
                     } else if ((fx[0] == 'E' || fx[0] == 'e') && (fx[1] == 'A' || fx[1] == 'a') && value >= 0) {
                         ev.legato = value != 0 ? 1 : 0;
+                    } else if ((fx[0] == 'E' || fx[0] == 'e') && (fx[1] == 'C' || fx[1] == 'c') && value >= 0) {
+                        ev.note_cut = value;
+                    } else if ((fx[0] == 'E' || fx[0] == 'e') && (fx[1] == 'D' || fx[1] == 'd') && value >= 0) {
+                        ev.note_delay = value;
+                    } else if ((fx[0] == 'F' || fx[0] == 'f') && (fx[1] == 'C' || fx[1] == 'c') && value >= 0) {
+                        ev.note_release = value;
                     } else if ((fx[0] == 'F' || fx[0] == 'f') && fx[1] == '5' && value >= 0) {
                         ev.macro_disable = value;
                     } else if ((fx[0] == 'F' || fx[0] == 'f') && fx[1] == '6' && value >= 0) {
@@ -1735,8 +1760,6 @@ static void song_set_retrigger(XfmSongChannel& ch_state, int ticks)
         song_clear_retrigger(ch_state);
         return;
     }
-    // 0Cxx is intentionally sticky until 0C00. Furnace had a PCM retrigger bug
-    // where finished samples were not replayed; we keep replaying the remembered note.
     ch_state.retrigger_ticks = ticks;
     ch_state.retrigger_tick_counter = 0;
     ch_state.retrigger_next_sample = -1;
@@ -2733,6 +2756,7 @@ static void song_key_on_channel(xfm_module* m, int ch, XfmSongChannel& ch_state)
     ch_state.pending_has_note = false;
     ch_state.wait_for_next_row = false;
     ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
+    ch_state.note_delay_sample = -1;
 }
 
 static void song_start_portamento(xfm_module* m, XfmSongPattern& pat, int ch,
@@ -2822,6 +2846,10 @@ static void song_process_row(xfm_module* m, int row_idx)
     for (int ch = 0; ch < pat.num_channels && ch < 6; ch++) {
         XfmSongEvent& ev = pat.rows[row_idx][ch];
         XfmSongChannel& ch_state = song.channels[ch];
+        song_clear_retrigger(ch_state);
+        ch_state.note_cut_sample = -1;
+        ch_state.note_delay_sample = -1;
+        ch_state.note_release_sample = -1;
         const XfmSongOpnEffect* morph_effect = nullptr;
         for (int i = 0; i < ev.opn_effect_count; i++) {
             if (ev.opn_effects[i].code == 0xEE) {
@@ -2935,6 +2963,12 @@ static void song_process_row(xfm_module* m, int row_idx)
         if (ev.macro_enable >= 0) {
             song_set_macro_enabled(m, ch, ev.macro_enable, true);
         }
+        if (ev.note_cut >= 0) {
+            ch_state.note_cut_sample = song_tick_to_row_sample(pat, ev.note_cut);
+        }
+        if (ev.note_release >= 0) {
+            ch_state.note_release_sample = song_tick_to_row_sample(pat, ev.note_release);
+        }
         for (int i = 0; i < ev.opn_effect_count; i++) {
             if (ev.opn_effects[i].code == 0xEE) continue;
             song_apply_opn_effect(m, ch, ev.opn_effects[i]);
@@ -2998,6 +3032,16 @@ static void song_process_row(xfm_module* m, int row_idx)
                             ch_state.pending_gap = get_dynamic_gap(m->sample_rate, rows_until_next, pat.samples_per_row);
                         } else {
                             ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
+                        }
+                    }
+                    if (ev.note_delay >= 0) {
+                        ch_state.wait_for_next_row = false;
+                        ch_state.note_delay_sample = song_tick_to_row_sample(pat, ev.note_delay);
+                        ch_state.pending_gap = ch_state.note_delay_sample;
+                        if (was_playing) {
+                            if (ch_state.envelope_hard_reset) m->chip->hard_mute(ch);
+                            else m->chip->key_off(ch);
+                            m->channel_active[ch] = false;
                         }
                     }
 
@@ -3087,6 +3131,10 @@ static void song_reset_active_channels(xfm_module* m)
         ch_state.envelope_rekey_sample = -1;
         ch_state.envelope_rekey_hard = false;
         ch_state.envelope_rekey_restart_macros = false;
+        ch_state.release_keyoff_pending = false;
+        ch_state.note_cut_sample = -1;
+        ch_state.note_delay_sample = -1;
+        ch_state.note_release_sample = -1;
         ch_state.sample_in_tick = 0;
         ch_state.macro_disabled_mask = 0;
         for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
@@ -3151,6 +3199,44 @@ static void song_commit_keyon(xfm_module* m, int current_gap)
 
         song_key_on_channel(m, ch, ch_state);
     }
+}
+
+static bool song_commit_note_cuts(xfm_module* m, int current_gap)
+{
+    if (!m || !m->active_song.active) return false;
+
+    bool changed = false;
+    for (int ch = 0; ch < 6; ch++) {
+        XfmSongChannel& ch_state = m->active_song.channels[ch];
+        if (ch_state.note_cut_sample < 0 || current_gap < ch_state.note_cut_sample) continue;
+
+        song_clear_envelope_rekey(ch_state);
+        song_stop_active_macros(m, ch);
+        if (m->channel_active[ch]) {
+            m->chip->key_off(ch);
+            changed = true;
+        }
+        m->channel_active[ch] = false;
+        ch_state.note_cut_sample = -1;
+    }
+    return changed;
+}
+
+static bool song_commit_note_releases(xfm_module* m, int current_gap)
+{
+    if (!m || !m->active_song.active) return false;
+
+    bool changed = false;
+    for (int ch = 0; ch < 6; ch++) {
+        XfmSongChannel& ch_state = m->active_song.channels[ch];
+        if (ch_state.note_release_sample < 0 || current_gap < ch_state.note_release_sample) continue;
+
+        song_clear_envelope_rekey(ch_state);
+        song_release_macros_then_key_off(m, ch);
+        ch_state.note_release_sample = -1;
+        changed = true;
+    }
+    return changed;
 }
 
 static bool song_commit_envelope_rekeys(xfm_module* m, int current_gap)
@@ -3268,6 +3354,10 @@ void xfm_song_play(xfm_module* m, xfm_song_id id, bool loop)
         m->active_song.channels[ch].envelope_rekey_sample = -1;
         m->active_song.channels[ch].envelope_rekey_hard = false;
         m->active_song.channels[ch].envelope_rekey_restart_macros = false;
+        m->active_song.channels[ch].release_keyoff_pending = false;
+        m->active_song.channels[ch].note_cut_sample = -1;
+        m->active_song.channels[ch].note_delay_sample = -1;
+        m->active_song.channels[ch].note_release_sample = -1;
         m->active_song.channels[ch].sample_in_tick = 0;
         m->active_song.channels[ch].macro_disabled_mask = 0;
         for (int target = 0; target < XFM_MACRO_TARGET_COUNT; target++) {
@@ -3470,6 +3560,8 @@ static void update_song(xfm_module* m, int num_samples)
             }
         }
 
+        song_commit_note_cuts(m, song.sample_in_row);
+        song_commit_note_releases(m, song.sample_in_row);
         song_commit_envelope_rekeys(m, song.sample_in_row);
 
         // At END of gap, commit key-on for pending notes
@@ -3567,6 +3659,14 @@ static bool process_song_events_now(xfm_module* m)
                 changed = true;
             }
         }
+    }
+
+    if (song_commit_note_cuts(m, song.sample_in_row)) {
+        changed = true;
+    }
+
+    if (song_commit_note_releases(m, song.sample_in_row)) {
+        changed = true;
     }
 
     if (song_commit_envelope_rekeys(m, song.sample_in_row)) {
@@ -3672,6 +3772,12 @@ static int next_song_event_delta(xfm_module* m, int max_frames)
         }
         if (ch_state.envelope_rekey_pending) {
             next = std::min(next, std::max(0, ch_state.envelope_rekey_sample - song.sample_in_row));
+        }
+        if (ch_state.note_cut_sample >= 0) {
+            next = std::min(next, std::max(0, ch_state.note_cut_sample - song.sample_in_row));
+        }
+        if (ch_state.note_release_sample >= 0) {
+            next = std::min(next, std::max(0, ch_state.note_release_sample - song.sample_in_row));
         }
         if (ch_state.pending_has_note && !ch_state.wait_for_next_row) {
             next = std::min(next, std::max(0, ch_state.pending_gap - song.sample_in_row));

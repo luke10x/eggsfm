@@ -251,9 +251,12 @@ struct XfmSongEvent {
     int     tremolo;        // -1 = no change, 0 = off, 0xxyy = speed/depth
     int     volume_slide;   // <= -1000000 = no change, 0 = off, positive = up, negative = down
     int     panning;        // -1 = no change, 0..3 = YM2612 LR bitfield
-    int     retrigger;      // -1 = no change, 0 = off, >0 = ticks between note restarts
+    int     retrigger;      // -1 = none, 0 = off, >0 = ticks between note restarts within this row
     int     note_slide;     // <= -1000000 = no change, signed 0xxyy speed/semitones
     int     fine_pitch;     // -1 = no change, 0..255, 0x80 = neutral
+    int     note_cut;       // -1 = none, 0..255 = key off at tick in this row
+    int     note_delay;     // -1 = none, 0..255 = key on row note at tick in this row
+    int     note_release;   // -1 = none, 0..255 = release macros and key off at tick in this row
     int     hard_reset;     // -1 = no change, 0 = off, 1 = on
     int     macro_enable;   // -1 = no change, 0 = all, target id = enable
     int     macro_disable;  // -1 = no change, 0 = all, target id = disable
@@ -311,8 +314,7 @@ struct XfmSongChannel {
     uint8_t         effect_arpeggio_step_b;
     uint8_t         effect_arpeggio_phase;
     bool            effect_arpeggio_active;
-    // 0Cxx is sticky until 0C00/reset and retriggers remembered notes even after silence;
-    // do not copy Furnace's historical finished-sample retrigger bug.
+    // Row-scoped 0Cxx retriggers the remembered note within the current row only.
     int             retrigger_ticks;
     int             retrigger_tick_counter;
     int             retrigger_next_sample;
@@ -321,6 +323,9 @@ struct XfmSongChannel {
     bool            envelope_rekey_hard;
     bool            envelope_rekey_restart_macros;
     bool            release_keyoff_pending;
+    int             note_cut_sample;
+    int             note_delay_sample;
+    int             note_release_sample;
     int             sample_in_tick;
     uint64_t        macro_disabled_mask;
     XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
