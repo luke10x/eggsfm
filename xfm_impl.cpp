@@ -181,6 +181,7 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
     m->active_song.rows_remaining = 0;
     m->active_song.loop_start_row = 0;
     m->active_song.loop_end_row = -1;
+    m->active_song.loop_reset_state = false;
     m->active_song.active = false;
     m->active_song.loop = false;
     for (int ch = 0; ch < 6; ch++) {
@@ -3018,9 +3019,14 @@ static void song_process_row(xfm_module* m, int row_idx)
                     
                     // Key off happens at sample 1 of this row in update_song()
                     // The new note will wait until end of this row (simulates manual OFF row)
-                    ch_state.wait_for_next_row = was_playing;
+                    // A retrigger row needs its new note to be live during
+                    // this row.  The ordinary transition delay would leave
+                    // it pending until the next row, causing 0Cxx to skip
+                    // every scheduled rekey.
+                    const bool retriggered_note = ev.retrigger > 0;
+                    ch_state.wait_for_next_row = was_playing && !retriggered_note;
 
-                    if (!was_playing) {
+                    if (!was_playing || retriggered_note) {
                         ch_state.pending_gap = 0;
                     } else {
                         // Look ahead to find next note on this channel
@@ -3308,6 +3314,7 @@ void xfm_song_play(xfm_module* m, xfm_song_id id, bool loop)
     m->active_song.rows_remaining = pat.num_rows;
     m->active_song.loop_start_row = 0;
     m->active_song.loop_end_row = pat.num_rows - 1;
+    m->active_song.loop_reset_state = false;
     m->active_song.active = true;
     m->active_song.loop = loop;
 
@@ -3395,6 +3402,12 @@ void xfm_song_set_loop_range(xfm_module* m, int loop_start, int loop_end)
     if (m->active_song.current_row < start || m->active_song.current_row > end) {
         song_jump_to_row(m, start);
     }
+}
+
+void xfm_song_set_loop_reset_state(xfm_module* m, bool reset_state)
+{
+    if (!m) return;
+    m->active_song.loop_reset_state = reset_state;
 }
 
 // Schedule song change
@@ -3598,6 +3611,9 @@ static void update_song(xfm_module* m, int num_samples)
                 if (song.loop) {
                     song.current_row = loopStart;
                     song.rows_remaining = std::max(1, loopEnd - loopStart + 1);
+                    if (song.loop_reset_state) {
+                        song_reset_active_channels(m);
+                    }
                 } else {
                     // Stop song
                     for (int ch = 0; ch < 6; ch++) {
@@ -3696,6 +3712,9 @@ static bool process_song_events_now(xfm_module* m)
             if (song.loop) {
                 song.current_row = loopStart;
                 song.rows_remaining = std::max(1, loopEnd - loopStart + 1);
+                if (song.loop_reset_state) {
+                    song_reset_active_channels(m);
+                }
             } else {
                 for (int ch = 0; ch < 6; ch++) {
                     m->chip->key_off(ch);

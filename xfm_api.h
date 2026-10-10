@@ -356,6 +356,9 @@ struct XfmActiveSong {
     int             rows_remaining;  // for loop tracking
     int             loop_start_row;
     int             loop_end_row;
+    // Reset channel and effect memory at each loop boundary when requested by
+    // a scoped editor/playback loop.
+    bool            loop_reset_state;
     bool            active;
     bool            loop;
     XfmSongChannel   channels[6];
@@ -405,6 +408,7 @@ public:
     Interface intf;
     ymfm::ym3438 chip;
     int acc_err;  // Bresenham resampling accumulator
+    uint64_t key_on_count[6] = {};
 
     XfmChipOpn() : chip(intf), acc_err(0) { chip.reset(); }
 
@@ -471,6 +475,7 @@ public:
     }
 
     void key_on(int ch) {
+        if (ch >= 0 && ch < 6) key_on_count[ch]++;
         write(0, 0x28, 0xF0 | ((ch >= 3) ? 0x04 : 0x00) | (ch % 3));
     }
 
@@ -948,6 +953,9 @@ void xfm_song_jump_to_row(xfm_module* m, int row);
  * playhead is outside the new range, it jumps to loop_start immediately.
  */
 void xfm_song_set_loop_range(xfm_module* m, int loop_start, int loop_end);
+
+/** Reset channel/effect state whenever the active loop range wraps. */
+void xfm_song_set_loop_reset_state(xfm_module* m, bool reset_state);
 
 /**
  * Schedule a song change.
