@@ -64,6 +64,14 @@ void audio_callback(void* userdata, Uint8* stream, int len) {
 }
 ```
 
+## Patched YM3438 performance work
+
+The local patched backend is in `xfm_patched_ym3438.cpp`; upstream YMFM remains
+available as the default backend. For a future SFX-only sparse channel clocking
+optimization, see [the implementation guide](docs/sparse-sfx-channel-clocking.md).
+It records the safe idle conditions, exact code locations, PCM parity cases,
+and performance acceptance criteria. Sparse clocking is not implemented yet.
+
 ## Audio Generation Pipeline
 
 ![Audio Generation Pipeline](docs/generation.svg)

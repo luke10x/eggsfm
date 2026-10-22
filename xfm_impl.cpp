@@ -78,6 +78,10 @@ static void song_load_channel_patch(xfm_module* m, int ch, int patch_id, int vol
 // MODULE LIFETIME
 // =============================================================================
 
+static bool g_xfm_use_patched_ymfm = false;
+
+void xfm_set_patched_ymfm(bool enabled) { g_xfm_use_patched_ymfm = enabled; }
+
 xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type chip_type)
 {
     // For now, only YM2612 and YM3438 are supported
@@ -95,7 +99,7 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
     m->buffer_frames = buffer_frames;
     m->chip_type     = chip_type;
     m->volume        = 1.0f;
-    m->chip          = new (std::nothrow) XfmChipOpn;
+    m->chip          = new (std::nothrow) XfmChipOpn(g_xfm_use_patched_ymfm);
     m->lfo_enable    = false;
     m->lfo_freq      = 0;
     m->tuning_mode   = XFM_TUNING_12_TET;
@@ -2869,8 +2873,9 @@ static void song_process_row(xfm_module* m, int row_idx)
         // Update instrument and volume if specified
         if (ev.patch_id >= 0) {
             if (!morph_start_requested) {
+                const bool instrument_changed = ch_state.current_patch != ev.patch_id;
                 ch_state.current_patch = ev.patch_id;
-                if (ch_state.patch_morph_active && ev.note < 0 && ev.note != -2 && ev.note != -3 && ev.note != -4) {
+                if (instrument_changed && ch_state.patch_morph_active && ev.note < 0 && ev.note != -2 && ev.note != -3 && ev.note != -4) {
                     if (m->channel_active[ch]) {
                         song_load_channel_patch(m, ch, ch_state.current_patch, ch_state.current_volume);
                     } else {
@@ -2879,7 +2884,7 @@ static void song_process_row(xfm_module* m, int row_idx)
                         m->live_op_mask[ch] = 0x0F;
                         ch_state.live_patch_valid = false;
                     }
-                } else {
+                } else if (instrument_changed) {
                     m->live_patch_valid[ch] = false;
                     m->live_patch_id[ch] = -1;
                     m->live_op_mask[ch] = 0x0F;
@@ -3994,7 +3999,8 @@ void xfm_note_off(xfm_module* m, xfm_voice_id v)
  * @param stream Output buffer (interleaved stereo int16_t)
  * @param frames Number of stereo frames to generate
  */
-void xfm_mix_song(xfm_module* m, int16_t* stream, int frames)
+void xfm_mix_song_profiled(xfm_module* m, int16_t* stream, int frames,
+                           uint64_t* elapsed_ticks, uint64_t (*read_ticks)(void))
 {
     if (!m || !m->chip || m->volume < 0.01f) {
         std::memset(stream, 0, frames * 2 * sizeof(int16_t));
@@ -4019,7 +4025,13 @@ void xfm_mix_song(xfm_module* m, int16_t* stream, int frames)
                 scope = scopeBuffers;
             }
         }
-        m->chip->generate_buffer(stream + offset * 2, chunk, m->sample_rate, scope);
+        if (elapsed_ticks && read_ticks) {
+            const uint64_t start = read_ticks();
+            m->chip->generate_buffer(stream + offset * 2, chunk, m->sample_rate, scope);
+            *elapsed_ticks += read_ticks() - start;
+        } else {
+            m->chip->generate_buffer(stream + offset * 2, chunk, m->sample_rate, scope);
+        }
         advance_song_time(m, chunk);
         offset += chunk;
     }
@@ -4035,6 +4047,11 @@ void xfm_mix_song(xfm_module* m, int16_t* stream, int frames)
     }
 }
 
+void xfm_mix_song(xfm_module* m, int16_t* stream, int frames)
+{
+    xfm_mix_song_profiled(m, stream, frames, nullptr, nullptr);
+}
+
 /**
  * @brief Generate audio samples from SFX module (SFX only).
  * 
@@ -4045,7 +4062,8 @@ void xfm_mix_song(xfm_module* m, int16_t* stream, int frames)
  * @param stream Output buffer (interleaved stereo int16_t)
  * @param frames Number of stereo frames to generate
  */
-void xfm_mix_sfx(xfm_module* m, int16_t* stream, int frames)
+void xfm_mix_sfx_profiled(xfm_module* m, int16_t* stream, int frames,
+                          uint64_t* elapsed_ticks, uint64_t (*read_ticks)(void))
 {
     if (!m || !m->chip || m->volume < 0.01f) {
         std::memset(stream, 0, frames * 2 * sizeof(int16_t));
@@ -4060,7 +4078,13 @@ void xfm_mix_sfx(xfm_module* m, int16_t* stream, int frames)
         if (chunk <= 0) chunk = 1;
         if (chunk > frames - offset) chunk = frames - offset;
 
-        m->chip->generate_buffer(stream + offset * 2, chunk, m->sample_rate);
+        if (elapsed_ticks && read_ticks) {
+            const uint64_t start = read_ticks();
+            m->chip->generate_buffer(stream + offset * 2, chunk, m->sample_rate);
+            *elapsed_ticks += read_ticks() - start;
+        } else {
+            m->chip->generate_buffer(stream + offset * 2, chunk, m->sample_rate);
+        }
         advance_sfx_time(m, chunk);
         offset += chunk;
     }
@@ -4074,4 +4098,9 @@ void xfm_mix_sfx(xfm_module* m, int16_t* stream, int frames)
             stream[i] = static_cast<int16_t>(stream[i] * vol);
         }
     }
+}
+
+void xfm_mix_sfx(xfm_module* m, int16_t* stream, int frames)
+{
+    xfm_mix_sfx_profiled(m, stream, frames, nullptr, nullptr);
 }

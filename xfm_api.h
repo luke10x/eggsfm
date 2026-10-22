@@ -31,6 +31,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "ymfm.h"
 #include "ymfm_opn.h"
@@ -38,6 +39,18 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Runtime FM backend selection applies to newly created modules.
+void xfm_set_patched_ymfm(bool enabled);
+
+// Opaque single-translation-unit YM3438 implementation.
+void* xfm_patched_chip_create(void);
+void xfm_patched_chip_destroy(void*);
+void xfm_patched_chip_reset(void*);
+void xfm_patched_chip_write(void*, uint32_t, uint8_t);
+uint32_t xfm_patched_chip_sample_rate(void*, uint32_t);
+void xfm_patched_chip_generate(void*, int32_t output[2], int32_t channels[12]);
+void xfm_patched_chip_restore(void*, const uint8_t*, size_t);
 /**
  * =============================================================================
  * FM PATCH DATA STRUCTURES
@@ -407,15 +420,28 @@ public:
 
     Interface intf;
     ymfm::ym3438 chip;
+    void* patched_chip = nullptr;
+    bool use_patched = false;
     int acc_err;  // Bresenham resampling accumulator
     uint64_t key_on_count[6] = {};
 
-    XfmChipOpn() : chip(intf), acc_err(0) { chip.reset(); }
+    explicit XfmChipOpn(bool patched = false) : chip(intf), use_patched(patched), acc_err(0) {
+        chip.reset();
+        if (use_patched) patched_chip = xfm_patched_chip_create();
+    }
+    ~XfmChipOpn() { if (patched_chip) xfm_patched_chip_destroy(patched_chip); }
+    XfmChipOpn(const XfmChipOpn&) = delete;
+    XfmChipOpn& operator=(const XfmChipOpn&) = delete;
 
     void write(uint8_t port, uint8_t reg, uint8_t val) {
         uint8_t addr = port * 2;
-        chip.write(addr,   reg);
-        chip.write(addr+1, val);
+        if (use_patched) {
+            xfm_patched_chip_write(patched_chip, addr, reg);
+            xfm_patched_chip_write(patched_chip, addr + 1, val);
+        } else {
+            chip.write(addr, reg);
+            chip.write(addr + 1, val);
+        }
     }
 
     void load_patch(const xfm_patch_opn& p, int ch) {
@@ -453,7 +479,8 @@ public:
     }
 
     void reset_chip() {
-        chip.reset();
+        if (use_patched) xfm_patched_chip_reset(patched_chip);
+        else chip.reset();
     }
 
     void set_frequency(int ch, double hz, int octaveOffset = 0) {
@@ -498,10 +525,16 @@ public:
 
     // Generate one sample at 44100 Hz reference rate
     void generate(int16_t* L, int16_t* R) {
-        ymfm::ym3438::output_data out;
-        chip.generate(&out, 1);
-        *L = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[0])));
-        *R = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[1])));
+        int32_t output[2];
+        if (use_patched) xfm_patched_chip_generate(patched_chip, output, nullptr);
+        else {
+            ymfm::ym3438::output_data out;
+            chip.generate(&out, 1);
+            output[0] = out.data[0];
+            output[1] = out.data[1];
+        }
+        *L = static_cast<int16_t>(std::max(-32768, std::min(32767, output[0])));
+        *R = static_cast<int16_t>(std::max(-32768, std::min(32767, output[1])));
     }
     
     // Generate 'samples' stereo frames at given sample_rate using Bresenham
@@ -515,35 +548,47 @@ public:
 
         But what if I want to output at a "normal" rate, like 44.1kHz? Sorry, you'll have to rate convert as needed.
         */
-        static int REF_RATE = chip.sample_rate(YM_CLOCK);
-        
+        const int ref_rate = use_patched
+            ? static_cast<int>(xfm_patched_chip_sample_rate(patched_chip, YM_CLOCK))
+            : static_cast<int>(chip.sample_rate(YM_CLOCK));
+
+        // Upstream YMFM has no per-channel output. For tracker capture only,
+        // clone its serialized state into the local chip and clock both for
+        // this buffer. Normal playback runs exactly one selected backend.
+        void* scope_chip = patched_chip;
+        if (channel_streams && !use_patched) {
+            if (!scope_chip) patched_chip = scope_chip = xfm_patched_chip_create();
+            std::vector<uint8_t> state_bytes;
+            ymfm::ymfm_saved_state state(state_bytes, true);
+            chip.save_restore(state);
+            xfm_patched_chip_restore(scope_chip, state_bytes.data(), state_bytes.size());
+        }
         for (int i = 0; i < samples; i++) {
-            int16_t L, R;
-            ymfm::ym3438::output_data channels[6];
+            int16_t L = 0, R = 0;
+            int32_t channels[12] = {};
             do {
-                if (channel_streams)
-                {
-                    ymfm::ym3438::output_data out;
-                    chip.generate_channelized(&out, channels, 1);
-                    L = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[0])));
-                    R = static_cast<int16_t>(std::max(-32768, std::min(32767, out.data[1])));
-                }
-                else
-                {
-                    generate(&L, &R);
-                }
-                this->acc_err += sample_rate;
-            } while (this->acc_err < REF_RATE);
-            this->acc_err -= REF_RATE;
-            stream[i * 2 + 0] = L;
+                if (channel_streams) {
+                    int32_t output[2];
+                    xfm_patched_chip_generate(scope_chip, output, channels);
+                    if (!use_patched) {
+                        ymfm::ym3438::output_data standard_out;
+                        chip.generate(&standard_out, 1);
+                        output[0] = standard_out.data[0];
+                        output[1] = standard_out.data[1];
+                    }
+                    L = static_cast<int16_t>(std::max(-32768, std::min(32767, output[0])));
+                    R = static_cast<int16_t>(std::max(-32768, std::min(32767, output[1])));
+                } else generate(&L, &R);
+                acc_err += sample_rate;
+            } while (acc_err < ref_rate);
+            acc_err -= ref_rate;
+            stream[i * 2] = L;
             stream[i * 2 + 1] = R;
-            if (channel_streams)
-            {
-                for (int ch = 0; ch < 6; ch++)
-                {
+            if (channel_streams) {
+                for (int ch = 0; ch < 6; ch++) {
                     if (!channel_streams[ch]) continue;
-                    channel_streams[ch][i * 2 + 0] = static_cast<int16_t>(std::max(-32768, std::min(32767, channels[ch].data[0])));
-                    channel_streams[ch][i * 2 + 1] = static_cast<int16_t>(std::max(-32768, std::min(32767, channels[ch].data[1])));
+                    channel_streams[ch][i * 2] = static_cast<int16_t>(std::max(-32768, std::min(32767, channels[ch * 2])));
+                    channel_streams[ch][i * 2 + 1] = static_cast<int16_t>(std::max(-32768, std::min(32767, channels[ch * 2 + 1])));
                 }
             }
         }
@@ -1230,6 +1275,10 @@ void xfm_mix(xfm_module* m, int16_t* stream, int frames);
  * @see xfm_mix() for full documentation
  */
 void xfm_mix_song(xfm_module* m, int16_t* stream, int frames);
+// Optional generation-only timer. elapsed_ticks is accumulated across every
+// generate_buffer call made while mixing this buffer.
+void xfm_mix_song_profiled(xfm_module* m, int16_t* stream, int frames,
+                           uint64_t* elapsed_ticks, uint64_t (*read_ticks)(void));
 
 /**
  * @brief Mix audio from SFX module (SFX only, no song).
@@ -1244,6 +1293,8 @@ void xfm_mix_song(xfm_module* m, int16_t* stream, int frames);
  * @see xfm_mix() for full documentation
  */
 void xfm_mix_sfx(xfm_module* m, int16_t* stream, int frames);
+void xfm_mix_sfx_profiled(xfm_module* m, int16_t* stream, int frames,
+                          uint64_t* elapsed_ticks, uint64_t (*read_ticks)(void));
 
 /**
  * @brief Set automatic note-off delay for song and SFX playback.
