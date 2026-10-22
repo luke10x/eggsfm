@@ -343,12 +343,6 @@ struct XfmSongChannel {
     uint64_t        macro_disabled_mask;
     XfmMacroState   macro_states[XFM_MACRO_TARGET_COUNT];
     bool            live_patch_valid;
-    bool            patch_morph_active;
-    bool            patch_morph_pending_start;
-    uint8_t         patch_morph_speed;
-    uint16_t        patch_morph_phase;
-    int             patch_morph_target_patch_id;
-    xfm_patch_opn   patch_morph_target;
 };
 
 // Song pattern (multi-channel)
