@@ -22,9 +22,6 @@
 static constexpr int SONG_PITCH_SLIDE_NONE = -1000000;
 static constexpr int SONG_VOLUME_SLIDE_NONE = -1000000;
 static constexpr int SONG_NOTE_SLIDE_NONE = -1000000;
-// Text tracker notes currently sound one octave low against Furnace/expected pitch.
-// Keep the YM register encoder stable and correct the convention at MIDI->Hz.
-static constexpr int XFM_PLAYBACK_OCTAVE_CORRECTION_SEMITONES = 12;
 static constexpr double XFM_PI = 3.14159265358979323846;
 
 
@@ -203,7 +200,7 @@ xfm_module* xfm_module_create(int sample_rate, int buffer_frames, xfm_chip_type 
         m->active_song.channels[ch].portamento_target_note = -1;
         m->active_song.channels[ch].current_hz = 0.0;
         m->active_song.channels[ch].target_hz = 0.0;
-        m->active_song.channels[ch].portamento_step_hz = 0.0;
+        m->active_song.channels[ch].portamento_start_hz = 0.0;
         m->active_song.channels[ch].volume_slide_speed = 0;
         m->active_song.channels[ch].note_slide_active = false;
         m->active_song.channels[ch].note_slide_target_hz = 0.0;
@@ -641,7 +638,7 @@ static int parse_hex2(const char* p) {
 
 static double note_to_hz(int midi_note)
 {
-    return 440.0 * std::pow(2.0, (midi_note + XFM_PLAYBACK_OCTAVE_CORRECTION_SEMITONES - 69) / 12.0);
+    return 440.0 * std::pow(2.0, (midi_note - 69) / 12.0);
 }
 
 static double note_to_hz_for_tuning(const xfm_module* m, int midi_note)
@@ -664,7 +661,7 @@ static double note_to_hz_for_tuning(const xfm_module* m, int midi_note)
         15.0 / 8.0,
     };
 
-    const int corrected = midi_note + XFM_PLAYBACK_OCTAVE_CORRECTION_SEMITONES;
+    const int corrected = midi_note;
     const int root = ((m->tuning_root % 12) + 12) % 12;
     const int pitchClass = ((corrected % 12) + 12) % 12;
     const int offset = ((pitchClass - root) % 12 + 12) % 12;
@@ -1539,7 +1536,7 @@ xfm_song_id xfm_song_declare(xfm_module* m, xfm_song_id id, const char* pattern_
                     } else if ((fx[0] == '0') && (fx[1] == 'A' || fx[1] == 'a') && value >= 0) {
                         int up = (value >> 4) & 0x0F;
                         int down = value & 0x0F;
-                        ev.volume_slide = up - down;
+                        ev.volume_slide = down ? -down : up;
                     } else if ((fx[0] == '0') && (fx[1] == 'C' || fx[1] == 'c') && value >= 0) {
                         ev.retrigger = value;
                     } else if ((fx[0] == 'E' || fx[0] == 'e') && (fx[1] == '1') && value >= 0) {
@@ -2201,6 +2198,63 @@ static void song_set_macro_enabled(xfm_module* m, int ch, int target, bool enabl
 }
 
 
+// Furnace's default linear-pitch YM2612 mode uses 128 units per semitone
+// and moves a 03xx glide by 4 * xx units on each tracker tick.
+static void song_advance_portamento_tick(xfm_module* m, int ch)
+{
+    if (!m || ch < 0 || ch >= 6) return;
+    XfmSongChannel& state = m->active_song.channels[ch];
+    if (!state.portamento_active || !m->channel_active[ch] ||
+        state.current_hz <= 0.0 || state.target_hz <= 0.0 ||
+        state.portamento_speed <= 0) return;
+
+    const double current = 12.0 * std::log2(state.current_hz);
+    const double target = 12.0 * std::log2(state.target_hz);
+    const double step = state.portamento_speed * (4.0 / 128.0);
+    const double remaining = target - current;
+    if (std::abs(remaining) <= step) {
+        state.current_hz = state.target_hz;
+        state.portamento_active = false;
+        state.portamento_speed = 0;
+        state.base_note = state.portamento_target_note;
+    } else {
+        state.current_hz = std::exp2((current + std::copysign(step, remaining)) / 12.0);
+    }
+    song_write_channel_frequency(m, ch, state);
+}
+
+static void song_advance_furnace_effect_tick(xfm_module* m, int ch)
+{
+    XfmSongChannel& state = m->active_song.channels[ch];
+    if (state.pitch_slide_speed != 0 && state.current_hz > 0.0 && m->channel_active[ch]) {
+        const double semitones = state.pitch_slide_speed / 32.0;
+        state.current_hz = std::clamp(state.current_hz * std::exp2(semitones / 12.0), 1.0, 20000.0);
+        state.target_hz = state.current_hz;
+    }
+    if (state.volume_slide_speed != 0) {
+        const int previous_volume = state.current_volume;
+        state.current_volume_f = std::clamp(state.current_volume_f + state.volume_slide_speed / 4.0,
+                                             0.0, 127.0);
+        state.current_volume = (int)state.current_volume_f;
+        if (state.current_volume_f == 0.0 || state.current_volume_f == 127.0)
+            state.volume_slide_speed = 0;
+        if (m->channel_active[ch] && state.current_volume != previous_volume)
+            song_write_channel_tremolo(m, ch, 0);
+    }
+    if (state.vibrato_depth > 0)
+        state.vibrato_phase = std::fmod(state.vibrato_phase + state.vibrato_speed, 64.0);
+    if (state.tremolo_depth > 0)
+        state.tremolo_phase = std::fmod(state.tremolo_phase + state.tremolo_speed, 128.0);
+    if (m->channel_active[ch]) {
+        if (state.current_hz > 0.0) song_write_channel_frequency(m, ch, state);
+        const int tremolo = state.tremolo_depth > 0 ?
+            (int)std::lround((1.0 - std::cos(2.0 * XFM_PI * state.tremolo_phase / 128.0))
+                             * state.tremolo_depth / 2.0) : 0;
+        if (state.volume_slide_speed != 0 || state.tremolo_depth > 0)
+            song_write_channel_tremolo(m, ch, tremolo);
+    }
+}
+
 static void song_advance_macros(xfm_module* m, int frames)
 {
     if (!m || !m->active_song.active || frames <= 0) return;
@@ -2216,6 +2270,12 @@ static void song_advance_macros(xfm_module* m, int frames)
 
         while (ch_state.sample_in_tick >= samples_per_tick) {
             ch_state.sample_in_tick -= samples_per_tick;
+            // The boundary at the end of a row is the next row's first
+            // tick. song_process_row() applies that tick after its effects.
+            if (m->active_song.sample_in_row < pat.samples_per_row) {
+                song_advance_portamento_tick(m, ch);
+                song_advance_furnace_effect_tick(m, ch);
+            }
 
             for (int target = 1; target < XFM_MACRO_TARGET_COUNT; target++) {
                 XfmMacroState& state = ch_state.macro_states[target];
@@ -2557,8 +2617,11 @@ static double song_channel_effective_hz(const xfm_module* m, const XfmSongChanne
         hz *= std::pow(2.0, ch_state.fine_pitch_cents / 1200.0);
     }
     if (ch_state.vibrato_depth > 0) {
-        double cents = std::sin(ch_state.vibrato_phase) * (ch_state.vibrato_depth * 7.0);
-        hz *= std::pow(2.0, cents / 1200.0);
+        // Furnace's default linear pitch uses a 64-step sine table and
+        // approximately 8 pitch units per depth step (128 per semitone).
+        const double pitch_units = std::sin(2.0 * XFM_PI * ch_state.vibrato_phase / 64.0)
+            * ch_state.vibrato_depth * 127.0 * 15.0 / (16.0 * 15.0);
+        hz *= std::exp2(pitch_units / (128.0 * 12.0));
     }
     return hz;
 }
@@ -2618,10 +2681,10 @@ static void song_start_portamento(xfm_module* m, XfmSongPattern& pat, int ch,
         song_load_channel_patch(m, ch, ch_state.current_patch, ch_state.current_volume);
     }
 
-    int duration = std::max(1, (pat.samples_per_row * 16) / std::max(1, ch_state.portamento_speed));
+    (void)pat;
+    ch_state.portamento_start_hz = ch_state.current_hz;
     ch_state.target_hz = target_hz;
     ch_state.portamento_target_note = target_note;
-    ch_state.portamento_step_hz = (target_hz - ch_state.current_hz) / duration;
     ch_state.portamento_active = true;
     ch_state.pending_has_note = false;
     ch_state.wait_for_next_row = false;
@@ -2713,8 +2776,7 @@ static void song_process_row(xfm_module* m, int row_idx)
             ch_state.effect_arpeggio_active = ev.arpeggio != 0;
             ch_state.effect_arpeggio_step_a = static_cast<uint8_t>((ev.arpeggio >> 4) & 0x0F);
             ch_state.effect_arpeggio_step_b = static_cast<uint8_t>(ev.arpeggio & 0x0F);
-            ch_state.effect_arpeggio_phase = 0;
-            ch_state.effect_arp_offset = 0;
+            if (!ch_state.effect_arpeggio_active) ch_state.effect_arp_offset = 0;
             if (m->channel_active[ch]) {
                 song_write_channel_frequency(m, ch, ch_state);
             }
@@ -2723,6 +2785,7 @@ static void song_process_row(xfm_module* m, int row_idx)
         if (ev.pitch_slide != SONG_PITCH_SLIDE_NONE) {
             ch_state.pitch_slide_speed = ev.pitch_slide;
             ch_state.portamento_active = false;
+            ch_state.portamento_speed = 0;
             ch_state.note_slide_active = false;
         }
         if (ev.portamento >= 0) {
@@ -2736,21 +2799,20 @@ static void song_process_row(xfm_module* m, int row_idx)
         if (ev.vibrato >= 0) {
             ch_state.vibrato_speed = (ev.vibrato >> 4) & 0x0F;
             ch_state.vibrato_depth = ev.vibrato & 0x0F;
-            if (ev.vibrato == 0) {
-                ch_state.vibrato_phase = 0.0;
-            }
+            if (ev.vibrato == 0 && m->channel_active[ch])
+                song_write_channel_frequency(m, ch, ch_state);
         }
         if (ev.tremolo >= 0) {
+            if (ch_state.tremolo_depth == 0) ch_state.tremolo_phase = 0.0;
             ch_state.tremolo_speed = (ev.tremolo >> 4) & 0x0F;
             ch_state.tremolo_depth = ev.tremolo & 0x0F;
-            if (ev.tremolo == 0) {
-                ch_state.tremolo_phase = 0.0;
-                song_write_channel_tremolo(m, ch, 0);
-            }
+            if (ev.tremolo == 0) song_write_channel_tremolo(m, ch, 0);
         }
         if (ev.volume_slide != SONG_VOLUME_SLIDE_NONE) {
             ch_state.volume_slide_speed = ev.volume_slide;
+            if (ev.volume_slide != 0) ch_state.tremolo_depth = 0;
         }
+        if (ev.tremolo > 0) ch_state.volume_slide_speed = 0;
         if (ev.panning >= 0) {
             ch_state.effect_pan = ev.panning;
             if (m->live_patch_valid[ch]) {
@@ -2808,17 +2870,10 @@ static void song_process_row(xfm_module* m, int row_idx)
             ch_state.pending_gap = get_min_gap_samples(m->sample_rate);
             ch_state.arp_offset = 0;
             ch_state.effect_arp_offset = 0;
-            ch_state.effect_arpeggio_phase = 0;
         } else if (ev.note >= 0) {
             song_clear_envelope_rekey(ch_state);
-            if (ev.arpeggio < 0) {
-                ch_state.effect_arpeggio_active = false;
-                ch_state.effect_arpeggio_step_a = 0;
-                ch_state.effect_arpeggio_step_b = 0;
-            }
-            ch_state.effect_arpeggio_phase = 0;
-            ch_state.effect_arp_offset = 0;
-            if (ch_state.portamento_speed > 0 && m->channel_active[ch]) {
+            // Furnace remembers 00xy across notes; only 0000 clears it.
+            if (ev.portamento > 0 && m->channel_active[ch]) {
                 song_start_portamento(m, pat, ch, ch_state, ev.note);
             } else {
                 bool handled_note = false;
@@ -2878,7 +2933,9 @@ static void song_process_row(xfm_module* m, int row_idx)
         } else {
             // ev.note == -1: no new note, keep previous state
         }
-
+        // Furnace's default setting advances effects on the first tick too.
+        song_advance_portamento_tick(m, ch);
+        song_advance_furnace_effect_tick(m, ch);
     }
 }
 
@@ -2908,7 +2965,7 @@ static void song_reset_active_channels(xfm_module* m)
         ch_state.portamento_target_note = -1;
         ch_state.current_hz = 0.0;
         ch_state.target_hz = 0.0;
-        ch_state.portamento_step_hz = 0.0;
+        ch_state.portamento_start_hz = 0.0;
         ch_state.volume_slide_speed = 0;
         ch_state.note_slide_active = false;
         ch_state.note_slide_target_hz = 0.0;
@@ -3126,7 +3183,7 @@ void xfm_song_play(xfm_module* m, xfm_song_id id, bool loop)
         m->active_song.channels[ch].portamento_target_note = -1;
         m->active_song.channels[ch].current_hz = 0.0;
         m->active_song.channels[ch].target_hz = 0.0;
-        m->active_song.channels[ch].portamento_step_hz = 0.0;
+        m->active_song.channels[ch].portamento_start_hz = 0.0;
         m->active_song.channels[ch].volume_slide_speed = 0;
         m->active_song.channels[ch].note_slide_active = false;
         m->active_song.channels[ch].note_slide_target_hz = 0.0;
@@ -3546,21 +3603,7 @@ static int next_song_event_delta(xfm_module* m, int max_frames)
 
     for (int ch = 0; ch < 6; ch++) {
         XfmSongChannel& ch_state = song.channels[ch];
-        if (ch_state.pitch_slide_speed != 0) {
-            next = std::min(next, 64);
-        }
-        if (ch_state.volume_slide_speed != 0) {
-            next = std::min(next, 64);
-        }
-        if (ch_state.portamento_active) {
-            next = std::min(next, 64);
-        }
-        if (ch_state.note_slide_active) {
-            next = std::min(next, 64);
-        }
-        if (ch_state.vibrato_depth > 0 || ch_state.tremolo_depth > 0) {
-            next = std::min(next, 64);
-        }
+        if (ch_state.note_slide_active) next = std::min(next, 64);
         bool has_active_macro = false;
         for (int target = 1; target < XFM_MACRO_TARGET_COUNT; target++) {
             if (ch_state.macro_states[target].active) {
@@ -3572,7 +3615,10 @@ static int next_song_event_delta(xfm_module* m, int max_frames)
             int samples_per_tick = std::max(1, m->sample_rate / std::max(1, pat.tick_rate));
             next = std::min(next, std::max(0, samples_per_tick - ch_state.sample_in_tick));
         }
-        if (ch_state.effect_arpeggio_active || ch_state.retrigger_ticks > 0) {
+        if (ch_state.effect_arpeggio_active || ch_state.retrigger_ticks > 0 ||
+            ch_state.portamento_active || ch_state.pitch_slide_speed != 0 ||
+            ch_state.volume_slide_speed != 0 || ch_state.vibrato_depth > 0 ||
+            ch_state.tremolo_depth > 0) {
             int samples_per_tick = std::max(1, m->sample_rate / std::max(1, pat.tick_rate));
             next = std::min(next, std::max(0, samples_per_tick - ch_state.sample_in_tick));
         }
@@ -3602,39 +3648,6 @@ static void advance_song_portamento(xfm_module* m, int frames)
 
     for (int ch = 0; ch < 6; ch++) {
         XfmSongChannel& ch_state = m->active_song.channels[ch];
-        if (ch_state.pitch_slide_speed != 0 && m->channel_active[ch] && ch_state.current_hz > 0.0) {
-            double cents_per_second = std::abs(ch_state.pitch_slide_speed) * 25.0;
-            double cents = cents_per_second * (double)frames / (double)m->sample_rate;
-            if (ch_state.pitch_slide_speed < 0) cents = -cents;
-            ch_state.current_hz *= std::pow(2.0, cents / 1200.0);
-            ch_state.target_hz = ch_state.current_hz;
-        }
-
-        bool volume_changed = false;
-        if (ch_state.volume_slide_speed != 0 && m->channel_active[ch]) {
-            double delta = (double)ch_state.volume_slide_speed * (double)frames / (double)std::max(1, pat.samples_per_row);
-            ch_state.current_volume_f = std::max(0.0, std::min(127.0, ch_state.current_volume_f + delta));
-            int new_volume = (int)std::round(ch_state.current_volume_f);
-            if (new_volume != ch_state.current_volume) {
-                ch_state.current_volume = new_volume;
-                volume_changed = true;
-            }
-        }
-
-        if (ch_state.portamento_active && m->channel_active[ch]) {
-            double next_hz = ch_state.current_hz + ch_state.portamento_step_hz * frames;
-            bool reached = (ch_state.portamento_step_hz >= 0.0 && next_hz >= ch_state.target_hz) ||
-                           (ch_state.portamento_step_hz < 0.0 && next_hz <= ch_state.target_hz);
-            if (reached || std::abs(ch_state.portamento_step_hz) < 0.000001) {
-                next_hz = ch_state.target_hz;
-                ch_state.portamento_active = false;
-            }
-
-            if (next_hz > 0.0) {
-                ch_state.current_hz = next_hz;
-            }
-        }
-
         if (ch_state.note_slide_active && m->channel_active[ch]) {
             double next_hz = ch_state.current_hz + ch_state.note_slide_step_hz * frames;
             bool reached = (ch_state.note_slide_step_hz >= 0.0 && next_hz >= ch_state.note_slide_target_hz) ||
@@ -3649,29 +3662,8 @@ static void advance_song_portamento(xfm_module* m, int frames)
             }
         }
 
-        if (m->channel_active[ch] && ch_state.current_hz > 0.0) {
-            if (ch_state.vibrato_depth > 0) {
-                double rate_hz = 0.8 + ch_state.vibrato_speed * 0.75;
-                ch_state.vibrato_phase += (2.0 * XFM_PI * rate_hz * frames) / (double)m->sample_rate;
-                if (ch_state.vibrato_phase > 2.0 * XFM_PI) {
-                    ch_state.vibrato_phase = std::fmod(ch_state.vibrato_phase, 2.0 * XFM_PI);
-                }
-            }
+        if (m->channel_active[ch] && ch_state.note_slide_active)
             song_write_channel_frequency(m, ch, ch_state);
-        }
-
-        if (m->channel_active[ch] && ch_state.tremolo_depth > 0) {
-            double rate_hz = 0.8 + ch_state.tremolo_speed * 0.75;
-            ch_state.tremolo_phase += (2.0 * XFM_PI * rate_hz * frames) / (double)m->sample_rate;
-            if (ch_state.tremolo_phase > 2.0 * XFM_PI) {
-                ch_state.tremolo_phase = std::fmod(ch_state.tremolo_phase, 2.0 * XFM_PI);
-            }
-            double bipolar = (std::sin(ch_state.tremolo_phase) + 1.0) * 0.5;
-            int attenuation = (int)std::round(bipolar * ch_state.tremolo_depth * 4.0);
-            song_write_channel_tremolo(m, ch, attenuation);
-        } else if (volume_changed) {
-            song_write_channel_tremolo(m, ch, 0);
-        }
     }
 }
 

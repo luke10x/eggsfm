@@ -303,7 +303,7 @@ struct XfmSongChannel {
     int             portamento_target_note;
     double          current_hz;
     double          target_hz;
-    double          portamento_step_hz;
+    double          portamento_start_hz;
     int             volume_slide_speed;
     bool            note_slide_active;
     double          note_slide_target_hz;
